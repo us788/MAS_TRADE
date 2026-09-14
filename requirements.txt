@@ -1,0 +1,26 @@
+# 데이터
+pandas
+numpy
+pyarrow
+
+# 시장 데이터
+yfinance
+finance-datareader
+pykrx
+
+# 수집
+requests
+httpx
+beautifulsoup4
+feedparser
+
+# 설정 / 스키마
+python-dotenv
+pydantic
+
+# 분석
+scipy
+scikit-learn
+
+# 테스트
+pytest
