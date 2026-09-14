@@ -1,5 +1,6 @@
 """환경 설정. 키 값은 os.getenv로 참조만 하고 절대 출력하지 않는다."""
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,6 +12,16 @@ if RUN_MODE != "paper":
     )
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# ---- LLM (DeepSeek · 기획서 4절) ----
+# 벤더 교체가 base_url·모델명 변경으로 끝나도록 여기 한 곳에만 둔다 (4.7절).
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+LLM_MODEL_FAST = os.getenv("LLM_MODEL_FAST", "deepseek-flash")
+LLM_MODEL_DEEP = os.getenv("LLM_MODEL_DEEP", "deepseek-v4-pro")
+
+# 재현성 규칙(4.3절): temperature 0 고정. 그래도 결정론은 아니므로 반복 실행으로 분산을 본다.
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0"))
+LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "300"))
 
 
 def require(name: str) -> str:

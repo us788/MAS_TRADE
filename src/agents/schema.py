@@ -23,6 +23,10 @@ class AgentOpinion(BaseModel):
     rationale: str
     counter_rationale: str = Field(description="자기 의견에 대한 반대 논거. 비워두지 않는다")
     data_refs: list[str] = Field(default_factory=list, description="참조한 스냅샷 식별자")
+    llm_call_ids: list[str] = Field(
+        default_factory=list,
+        description="이 의견을 만든 LLMCall의 call_id. 모델 버전·비용 추적의 연결고리",
+    )
 
 
 class RiskVerdict(BaseModel):
@@ -48,4 +52,12 @@ class Signal(BaseModel):
     proposed_weight: float | None = Field(
         default=None,
         description="LLM 제시 비중. 기본 운용은 동일가중이고 이것은 비교군으로만 추적한다",
+    )
+    model_versions: list[str] = Field(
+        default_factory=list,
+        description="이 시그널에 쓰인 모델 버전 문자열. 버전 경계에서 성적을 섞지 않기 위해 남긴다",
+    )
+    estimated_cost_usd: float | None = Field(
+        default=None,
+        description="시그널 1건의 추정 비용. 단가표에 없으면 None — 모르면 0이 아니라 모른다고 둔다",
     )
