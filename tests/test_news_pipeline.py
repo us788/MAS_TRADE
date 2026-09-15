@@ -8,7 +8,14 @@ from pathlib import Path
 
 from src.data.finnhub_news import parse_item as finnhub_parse
 from src.data.naver_news import parse_item as naver_parse, parse_pub_date, publisher_from
-from src.data.news import NewsItem, clean_text, filter_as_of, matches_symbol
+from src.data.news import (
+    NewsItem,
+    Relevance,
+    classify_relevance,
+    clean_text,
+    filter_as_of,
+    is_excluded,
+)
 from src.data.storage import SnapshotStore
 
 UTC = timezone.utc
@@ -97,30 +104,57 @@ def test_최신순으로_정렬된다():
     assert [i.url for i in filter_as_of([a, b], NOW)] == ["b", "a"]
 
 
-# ---- 동명이의 필터 ----
+# ---- 동명이의 배제 ----
 
-def test_기아대책_기사는_걸러진다():
-    item = make(title="기아대책, 아동 후원 캠페인 진행")
-    assert matches_symbol(item, ["기아"], ["기아대책"]) is False
-
-
-def test_기아_자동차_기사는_통과한다():
-    item = make(title="기아, 3분기 판매량 증가")
-    assert matches_symbol(item, ["기아"], ["기아대책"]) is True
+def test_기아대책_기사는_배제된다():
+    assert is_excluded(make(title="기아대책, 아동 후원 캠페인 진행"), ["기아대책"]) is True
 
 
-def test_한화에어로_야구_기사는_걸러진다():
-    item = make(title="한화 이글스, 야구 경기 승리")
-    assert matches_symbol(item, ["한화에어로"], ["이글스", "야구"]) is False
+def test_한화_야구_기사는_배제된다():
+    assert is_excluded(make(title="한화 이글스, 야구 경기 승리"), ["이글스", "야구"]) is True
 
 
-def test_require가_비면_통과시킨다():
-    # 미국은 벤더가 티커를 태깅해주므로 재확인이 필요 없다.
-    assert matches_symbol(make(title="anything"), [], []) is True
+def test_배제어가_없으면_통과():
+    assert is_excluded(make(title="기아, 3분기 판매량 증가"), ["기아대책"]) is False
 
 
-def test_require에_하나도_안걸리면_버린다():
-    assert matches_symbol(make(title="다른 회사 뉴스"), ["삼성전자"], []) is False
+# ---- 관련성 등급 ----
+# 네이버는 본문까지 매칭하므로 "언급됐는가"로는 못 거른다. 제목에 있는지로 가른다.
+
+def test_제목에_있으면_TITLE():
+    item = make(title="삼성전자, 3분기 영업이익 발표", summary="...")
+    assert classify_relevance(item, ["삼성전자"]) is Relevance.TITLE
+
+
+def test_요약에만_있으면_SUMMARY():
+    # 검색 스니펫에는 검색어가 거의 항상 들어 있다. 이게 잡음의 정체다.
+    item = make(title="코스피, 4거래일 연속 하락", summary="삼성전자 등 대형주가...")
+    assert classify_relevance(item, ["삼성전자"]) is Relevance.SUMMARY
+
+
+def test_둘_다_없으면_NONE():
+    item = make(title="다른 회사 뉴스", summary="관련 없음")
+    assert classify_relevance(item, ["삼성전자"]) is Relevance.NONE
+
+
+def test_별칭_중_하나만_걸려도_TITLE():
+    item = make(title="LG엔솔, 수주 확대")
+    assert classify_relevance(item, ["LG에너지솔루션", "LG엔솔"]) is Relevance.TITLE
+
+
+def test_기본_파이프라인은_TITLE만_쓴다():
+    title = make(title="삼성전자 실적")
+    summary = make(title="코스피 하락", summary="삼성전자 포함")
+    from dataclasses import replace
+    assert replace(title, relevance="title").is_primary is True
+    assert replace(summary, relevance="summary").is_primary is False
+
+
+def test_벤더가_태깅한_기사는_제목_매칭_없이도_1차자료():
+    # Finnhub는 티커로 태깅해 돌려주므로 제목에 회사명이 없어도 관련 기사다.
+    from dataclasses import replace
+    item = replace(make(title="Chip stocks rally"), vendor_tagged=True, relevance="none")
+    assert item.is_primary is True
 
 
 # ---- 매체명 ----
@@ -165,3 +199,24 @@ def test_원본_응답을_따로_남긴다():
         store = SnapshotStore(root=Path(tmp) / "snap", log_dir=Path(tmp) / "logs")
         path = store.save_raw("naver", "005930", {"items": []}, NOW)
         assert path.exists() and "005930" in path.name
+
+
+# ---- 수집 커버리지 ----
+
+def test_커버리지_미달은_batch가_알린다():
+    from src.data.naver_news import NewsBatch
+    batch = NewsBatch(items=[], pages=10, oldest_seen=NOW, reached_floor=False)
+    # lookback 경계에 못 닿았다 = 그만큼 구멍. 호출부가 gap으로 기록해야 한다.
+    assert batch.reached_floor is False
+
+
+def test_batch의_primary는_TITLE과_벤더태깅만():
+    from dataclasses import replace
+    from src.data.naver_news import NewsBatch
+    items = [
+        replace(make(url="a"), relevance="title"),
+        replace(make(url="b"), relevance="summary"),
+        replace(make(url="c"), relevance="none", vendor_tagged=True),
+    ]
+    batch = NewsBatch(items=items, pages=1, oldest_seen=NOW, reached_floor=True)
+    assert [i.url for i in batch.primary] == ["a", "c"]

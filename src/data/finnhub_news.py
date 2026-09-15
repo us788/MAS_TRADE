@@ -65,5 +65,8 @@ def parse_item(row: dict, symbol: str, collected_at: datetime) -> NewsItem | Non
         publisher=row.get("source", ""),
         published_at=datetime.fromtimestamp(int(stamp), tz=timezone.utc),
         collected_at=to_utc(collected_at),
+        # Finnhub는 티커로 종목을 태깅해 돌려준다. 네이버 키워드 검색과 달리
+        # 벤더가 관련성을 보증하므로 별도 제목 매칭 없이 1차 자료로 쓴다.
+        vendor_tagged=True,
         extra={"category": row.get("category", ""), "vendor_id": row.get("id")},
     )

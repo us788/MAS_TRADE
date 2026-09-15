@@ -13,7 +13,27 @@ import html
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Protocol
+
+class Relevance(str, Enum):
+    """검색 결과가 실제로 그 종목 기사인지의 등급.
+
+    네이버 검색은 본문까지 매칭하므로 "종목명이 언급됐는가"로는 거를 수 없다.
+    검색어가 스니펫에 거의 항상 들어 있어 그 필터는 100% 통과한다.
+    실측(2026-09-15): 삼성전자 1,000건 중 제목 매칭 18%, 요약에만 82%.
+
+    구분은 **제목에 있는가**로 한다. 제목에 회사명이 있으면 그 기사는 그 회사에 관한
+    것일 가능성이 높고, 요약에만 있으면 대개 스쳐 지나가는 언급이다.
+    """
+
+    TITLE = "title"
+    """제목에 종목명. 기본 파이프라인은 이것만 쓴다."""
+    SUMMARY = "summary"
+    """요약에만. 버리지 않고 저장해 사후 재채점에 쓴다."""
+    NONE = "none"
+    """제목·요약 어디에도 없음. 본문에만 걸린 경우."""
+
 
 _BLOCK_TAG = re.compile(r"</?(?:br|p|div|li|tr|h[1-6])\b[^>]*>", re.I)
 _TAG = re.compile(r"<[^>]+>")
@@ -37,6 +57,10 @@ class NewsItem:
     collected_at: datetime
     """우리가 실제로 받아온 시각 (UTC). 이게 있어야 벤더 시각을 검증할 수 있다."""
     original_url: str = ""
+    relevance: str = Relevance.NONE.value
+    vendor_tagged: bool = False
+    """벤더가 종목을 직접 태깅했는가. Finnhub는 티커로 태깅하므로 True,
+    네이버는 키워드 검색이라 False — 이 차이가 신뢰도를 가른다."""
     extra: dict = field(default_factory=dict)
 
     @property
@@ -59,6 +83,11 @@ class NewsItem:
         basis = (self.original_url or self.url or f"{self.title}|{self.published_at}")
         return hashlib.sha256(basis.strip().lower().encode("utf-8")).hexdigest()[:16]
 
+    @property
+    def is_primary(self) -> bool:
+        """기본 파이프라인이 에이전트에 넘길 기사인가."""
+        return self.vendor_tagged or self.relevance == Relevance.TITLE.value
+
     def to_record(self) -> dict:
         """JSONL 한 줄. 공개 가능한 필드만 담는다."""
         return {
@@ -74,6 +103,8 @@ class NewsItem:
             "collected_at": self.collected_at.isoformat(),
             "known_at": self.known_at.isoformat(),
             "timestamp_suspect": self.timestamp_suspect,
+            "relevance": self.relevance,
+            "vendor_tagged": self.vendor_tagged,
             "content_hash": self.content_hash,
             **({"extra": self.extra} if self.extra else {}),
         }
@@ -127,14 +158,22 @@ def filter_as_of(
     return sorted(kept, key=lambda i: i.known_at, reverse=True)
 
 
-def matches_symbol(item: NewsItem, require: list[str], exclude: list[str]) -> bool:
-    """동명이의 필터. 한국 뉴스는 회사명으로 검색해야 해서 잡음이 크다.
-
-    require가 비어 있으면 통과시킨다 (미국은 티커 태깅이 벤더 쪽에서 된다).
-    """
+def is_excluded(item: NewsItem, exclude: list[str]) -> bool:
+    """동명이의 배제. 걸리면 등급을 매기지 않고 버린다 ('한화' -> 야구단)."""
     haystack = f"{item.title} {item.summary}"
-    if any(term and term in haystack for term in exclude):
-        return False
-    if not require:
-        return True
-    return any(term and term in haystack for term in require)
+    return any(term and term in haystack for term in exclude)
+
+
+def classify_relevance(item: NewsItem, names: list[str]) -> Relevance:
+    """제목에 있으면 TITLE, 요약에만 있으면 SUMMARY, 둘 다 없으면 NONE.
+
+    names가 비어 있으면 판정 근거가 없으므로 NONE. 벤더가 태깅하는 소스는
+    relevance 대신 vendor_tagged로 신뢰도를 표시한다.
+    """
+    if not names:
+        return Relevance.NONE
+    if any(name and name in item.title for name in names):
+        return Relevance.TITLE
+    if any(name and name in item.summary for name in names):
+        return Relevance.SUMMARY
+    return Relevance.NONE
