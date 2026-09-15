@@ -22,9 +22,13 @@ from src.data.naver_news import MAX_START, NaverNews, parse_item
 from src.data.universe import UNIVERSE_PATH, load_universe
 
 # 한 번의 수집이 커버해야 할 시간 = 주기. 여기에 안전 여유를 둔다.
-# 1,000건 한도의 절반(500건)만으로 주기를 덮도록 잡아, 뉴스가 갑자기 몰려도 버틴다.
-SAFETY_BUDGET = MAX_START // 2
-TIERS = (3, 6, 12, 24)
+#
+# 여유를 1/4(250건)로 잡는 이유: 일 한도 25,000회 중 실제 사용은 1,000회 미만이라
+# 한도가 전혀 병목이 아니다. 반면 놓친 구간은 영구 손실이다. 비용이 거의 0인 쪽으로
+# 치우치는 것이 맞다. 측정도 장중(뉴스가 몰리는 시간)에 하므로 야간 속도는 더 낮고,
+# 실적 시즌에는 몇 배로 뛴다 — 평균치에 딱 맞춘 주기는 스파이크에서 반드시 뚫린다.
+SAFETY_BUDGET = MAX_START // 4
+TIERS = (1, 3, 6, 12, 24)
 
 
 def assign_tier(rate_per_hour: float) -> int:
@@ -76,6 +80,17 @@ def main() -> int:
         rows.append((holding, tier, rate, title_pct))
         print(f"{holding.name:<20} {len(items):>5} {span_h:>8.1f} {rate:>8.1f} "
               f"{title_pct:>5.0f}% {tier:>4}h")
+
+        # 제목 매칭률이 너무 낮으면 별칭이 부족하다는 뜻이다. 실제 제목을 보여준다.
+        if title_pct < 15:
+            print(f"{'':<20} └ 제목 매칭률이 낮다. 별칭 보강 검토용 표본:")
+            for sample in items[:3]:
+                print(f"{'':<22} {sample.title[:56]}")
+
+        # 벤더 집계가 비현실적으로 낮으면 쿼리가 너무 좁은 것이다 (다단어 AND).
+        if span_h > 72:
+            print(f"{'':<20} └ 경고: 100건이 {span_h/24:.0f}일을 덮는다. "
+                  f"쿼리 {holding.news_query!r}가 너무 좁을 수 있다.")
 
     print()
     by_tier = {}
