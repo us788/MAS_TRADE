@@ -13,7 +13,6 @@ ALFRED vintage와 같은 구조여서, 재무는 별도 vintage 소스가 필요
 from __future__ import annotations
 
 import json
-import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -23,6 +22,7 @@ from typing import Any, Iterable
 import requests
 
 from src import config
+from src.data._http import RateLimiter
 
 # 같은 개념이라도 회사마다 태그가 다르다. 폴백을 두지 않으면 종목 절반이
 # 조용히 None으로 빠진다. 앞에서부터 찾아 처음 걸리는 태그를 쓴다.
@@ -89,22 +89,6 @@ class Filing:
         return self.primary_document
 
 
-class _RateLimiter:
-    """최소 호출 간격을 지킨다. SEC 상한은 초당 10건이고 넘기면 차단될 수 있다."""
-
-    def __init__(self, max_rps: float) -> None:
-        self._min_interval = 1.0 / max_rps if max_rps > 0 else 0.0
-        self._lock = threading.Lock()
-        self._last = 0.0
-
-    def wait(self) -> None:
-        with self._lock:
-            elapsed = time.monotonic() - self._last
-            if elapsed < self._min_interval:
-                time.sleep(self._min_interval - elapsed)
-            self._last = time.monotonic()
-
-
 class EdgarClient:
     """EDGAR 조회. 원본 응답을 스냅샷으로 남긴다 (재현성의 전제)."""
 
@@ -116,7 +100,7 @@ class EdgarClient:
     ) -> None:
         self._user_agent = user_agent or config.require("SEC_USER_AGENT")
         self._cache_dir = cache_dir or (config.SNAPSHOT_DIR / "edgar")
-        self._limiter = _RateLimiter(max_rps if max_rps is not None else config.SEC_MAX_RPS)
+        self._limiter = RateLimiter(max_rps if max_rps is not None else config.SEC_MAX_RPS)
         self._session = requests.Session()
         self._session.headers.update(
             {
