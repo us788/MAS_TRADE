@@ -9,10 +9,12 @@ from pathlib import Path
 
 from src.data.collector import (
     DUE_SLACK,
-    MIN_LOOKBACK_DAYS,
+    MAX_LOOKBACK_DAYS,
+    MIN_LOOKBACK_HOURS,
     Plan,
     build_plan,
     collect_one,
+    compute_lookback_days,
 )
 from src.data.news import NewsBatch, NewsItem
 from src.data.storage import Store
@@ -94,11 +96,39 @@ def test_시장과_종목을_한정할_수_있다():
         assert set(_plans(store, symbols=("005930",))) == {"005930"}
 
 
-def test_lookback은_주기의_두_배이되_하한이_있다():
-    slow = Plan(_universe().get("KR", "105560"), "naver", 24, None, True, "")
-    fast = Plan(_universe().get("KR", "005930"), "naver", 1, None, True, "")
-    assert slow.lookback_days == 2.0                  # 24h 주기 -> 2일
-    assert fast.lookback_days == MIN_LOOKBACK_DAYS    # 1h 주기 -> 하한 적용
+# ---- lookback ----
+# 주기 기준 고정값은 두 방향으로 틀린다. 평소엔 과하게 받아 페이지 상한에 가까워지고
+# (실측: 1시간 주기에 6시간을 받아 10페이지 중 8 소진), 장기 중단 뒤엔 못 메운다.
+
+def test_첫_수집은_주기의_두_배를_받는다():
+    assert compute_lookback_days(None, 24, NOW) == 2.0
+    assert compute_lookback_days(None, 1, NOW) * 24 == 2.0
+
+
+def test_평소에는_경과시간의_1_5배만_받는다():
+    last = NOW - timedelta(hours=1)
+    assert compute_lookback_days(last, 1, NOW) * 24 == 1.5
+
+
+def test_하한_아래로_내려가지_않는다():
+    # cron이 거의 바로 다시 깨워도 최소 구간은 받는다.
+    last = NOW - timedelta(minutes=5)
+    assert compute_lookback_days(last, 1, NOW) * 24 == MIN_LOOKBACK_HOURS
+
+
+def test_장기_중단_뒤에는_자동으로_넓어진다():
+    # 고정 하한이었다면 5시간 구멍을 못 메운다.
+    assert compute_lookback_days(NOW - timedelta(hours=5), 1, NOW) * 24 == 7.5
+
+
+def test_상한을_넘지_않는다():
+    # 무한정 거슬러 올라가도 벤더가 주지 않는다.
+    assert compute_lookback_days(NOW - timedelta(days=90), 24, NOW) == MAX_LOOKBACK_DAYS
+
+
+def test_계획에_lookback이_실려_나온다():
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _plans(_store(tmp))["005930"].lookback_days > 0
 
 
 # ---- 실패 처리 ----
@@ -106,6 +136,14 @@ def test_lookback은_주기의_두_배이되_하한이_있다():
 class _Boom:
     def collect(self, *a, **k):
         raise RuntimeError("HTTP 429")
+
+
+class _Pages:
+    """여러 페이지를 돌려주는 어댑터."""
+
+    def collect(self, symbol, as_of, lookback_days, **k):
+        return NewsBatch(items=[], pages=3, oldest_seen=as_of, reached_floor=True,
+                         raw=[{"page": 1}, {"page": 2}, {"page": 3}])
 
 
 class _Partial:
@@ -144,3 +182,14 @@ def test_커버리지_미달도_gap으로_남는다():
         assert len(store.open_gaps()) == 1
         # 다만 수집 자체는 일어났으므로 이력은 남는다
         assert store.last_run_at("005930", "naver") == NOW
+
+
+def test_페이지가_여러개여도_원본이_덮어써지지_않는다():
+    import json
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        plan = Plan(_universe().get("KR", "005930"), "naver", 1, None, True, "", 0.1)
+        collect_one(store, _Pages(), plan, NOW)
+        files = list((Path(tmp) / "raw").rglob("*.json"))
+        assert len(files) == 1
+        assert json.loads(files[0].read_text(encoding="utf-8"))["page_count"] == 3

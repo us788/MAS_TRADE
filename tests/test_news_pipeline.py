@@ -258,11 +258,18 @@ def test_수집_이력으로_마지막_실행_시각을_안다():
         assert store.last_run_at("005930", "naver") == NOW
 
 
-def test_원본_응답을_따로_남긴다():
+def test_원본_응답은_수집_1회를_한_파일에_담는다():
+    # 페이지별로 쓰면 파일명이 수집 시각 하나로 같아져 서로를 덮어쓴다.
+    # 실제로 8페이지를 받고 1개만 남은 적이 있다 (2026-09-15).
+    import json
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp)
-        path = store.save_raw("naver", "005930", {"items": []}, NOW)
-        assert path.exists() and "005930" in path.name
+        pages = [{"items": [1]}, {"items": [2]}, {"items": [3]}]
+        path = store.save_raw("naver", "005930", pages, NOW)
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["page_count"] == 3
+        assert len(saved["responses"]) == 3
+        assert len(list(path.parent.glob("*.json"))) == 1
 
 
 # ---- 수집 커버리지 ----

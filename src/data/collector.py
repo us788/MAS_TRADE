@@ -21,9 +21,17 @@ from src.data.universe import Holding, Universe
 # 1시간 주기인데 cron이 1분 늦게 깨우면 다음 시간까지 밀려 구멍이 생긴다.
 DUE_SLACK = timedelta(minutes=5)
 
-# 주기의 몇 배를 거슬러 받을지. 1배면 경계에서 놓친 것을 못 메운다.
-LOOKBACK_MULTIPLIER = 2.0
-MIN_LOOKBACK_DAYS = 0.25
+# lookback은 **마지막 수집 이후 경과 시간** 기준으로 정한다. 주기 기준 고정값을 쓰면
+# 두 방향으로 틀린다 — 평소엔 필요 이상으로 받아 페이지 상한에 가까워지고
+# (실측: 1시간 주기에 6시간을 받아 10페이지 중 8을 소진), cron이 몇 시간 멈췄다
+# 살아났을 때는 그 구간을 못 메운다.
+LOOKBACK_MULTIPLIER = 1.5
+"""경과 시간의 몇 배를 받을지. 1배면 경계가 딱 붙어 조금만 어긋나도 샌다."""
+FIRST_RUN_MULTIPLIER = 2.0
+"""첫 수집은 기준이 없으므로 주기의 배수로 잡는다."""
+MIN_LOOKBACK_HOURS = 1.0
+MAX_LOOKBACK_DAYS = 7.0
+"""장기 중단 뒤 무한정 거슬러 올라가지 않게 막는다. 어차피 벤더가 안 준다."""
 
 
 @dataclass
@@ -34,12 +42,8 @@ class Plan:
     last_run: datetime | None
     due: bool
     reason: str
-
-    @property
-    def lookback_days(self) -> float:
-        """직전 수집 이후 구간을 여유 있게 덮는다."""
-        span = self.interval_hours * LOOKBACK_MULTIPLIER / 24
-        return max(span, MIN_LOOKBACK_DAYS)
+    lookback_days: float = 0.0
+    """직전 수집 이후 구간을 겹쳐 덮는다. build_plan이 계산해 넣는다."""
 
 
 @dataclass
@@ -81,8 +85,27 @@ def build_plan(
                 reason = (f"{elapsed.total_seconds()/3600:.1f}h 경과 / {interval}h 주기"
                           if due else
                           f"대기 ({(timedelta(hours=interval) - elapsed).total_seconds()/3600:.1f}h 남음)")
-            plans.append(Plan(holding, source, interval, last, due, reason))
+            plans.append(Plan(holding, source, interval, last, due, reason,
+                              lookback_days=compute_lookback_days(last, interval, now)))
     return plans
+
+
+def compute_lookback_days(
+    last_run: datetime | None, interval_hours: int, now: datetime
+) -> float:
+    """받아올 구간의 길이(일).
+
+    - 첫 수집: 기준이 없으므로 주기의 2배
+    - 평소: 마지막 수집 이후 경과 시간의 1.5배 (겹쳐 받고 중복은 DB가 막는다)
+    - 하한 1시간, 상한 7일
+    """
+    if last_run is None:
+        hours = interval_hours * FIRST_RUN_MULTIPLIER
+    else:
+        elapsed_h = (_utc(now) - _utc(last_run)).total_seconds() / 3600
+        hours = max(elapsed_h, 0.0) * LOOKBACK_MULTIPLIER
+    hours = max(hours, MIN_LOOKBACK_HOURS)
+    return min(hours / 24, MAX_LOOKBACK_DAYS)
 
 
 def collect_one(store: Store, adapter, plan: Plan, as_of: datetime) -> tuple[NewsBatch | None, str]:
@@ -102,8 +125,8 @@ def collect_one(store: Store, adapter, plan: Plan, as_of: datetime) -> tuple[New
         store.record_gap(holding.market, plan.source, holding.symbol, reason, as_of)
         return None, reason
 
-    for page in batch.raw:
-        store.save_raw(plan.source, holding.symbol, page, as_of)
+    if batch.raw:
+        store.save_raw(plan.source, holding.symbol, batch.raw, as_of)
 
     result = store.add_news(batch.items)
     store.record_run(

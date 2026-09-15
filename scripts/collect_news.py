@@ -80,7 +80,8 @@ def main() -> int:
     for plan in plans:
         mark = "->" if plan.due else "  "
         print(f" {mark} {plan.holding.market} {plan.holding.name:<18} "
-              f"{plan.interval_hours:>2}h  {plan.reason}")
+              f"주기 {plan.interval_hours:>2}h  lookback {plan.lookback_days*24:>5.1f}h  "
+              f"{plan.reason}")
 
     if args.dry_run:
         print("\n--dry-run: 호출하지 않았습니다.")

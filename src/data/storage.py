@@ -255,13 +255,24 @@ class Store:
 
     # ---- 원본 응답 ----
 
-    def save_raw(self, source: str, symbol: str, payload, collected_at: datetime) -> Path:
-        """원본 응답을 그대로 남긴다. 파서를 고쳤을 때 재현하려면 이것이 있어야 한다."""
+    def save_raw(self, source: str, symbol: str, pages: list, collected_at: datetime) -> Path:
+        """수집 1회의 원본 응답을 **전부** 한 파일에 남긴다.
+
+        페이지별로 따로 쓰면 파일명이 수집 시각 하나로 같아져 서로를 덮어쓴다.
+        실제로 8페이지를 받고 1개만 남은 적이 있다 (2026-09-15). 재현성의 전제가
+        깨지는 버그라, 수집 1회를 한 단위로 묶는다.
+        """
         stamp = _utc(collected_at)
         path = (self.raw_dir / source / stamp.strftime("%Y-%m-%d")
                 / f"{symbol.replace('/', '_')}_{stamp.strftime('%Y%m%dT%H%M%SZ')}.json")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        path.write_text(json.dumps({
+            "source": source,
+            "symbol": symbol,
+            "collected_at": stamp.isoformat(),
+            "page_count": len(pages),
+            "responses": pages,
+        }, ensure_ascii=False), encoding="utf-8")
         return path
 
 

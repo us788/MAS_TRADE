@@ -60,10 +60,26 @@ src/
 ├── llm/       LLM 호출 레이어 (DeepSeek, 벤더 교체 가능 / 버전·비용 로깅)
 ├── agents/    분석 에이전트, 논쟁 레이어, 리스크 엔진
 └── eval/      백테스트 하네스, 시그널 채점, 지표
+scripts/       수집·측정·진단 CLI
 docs/          기획서, 데이터 소스, 작업 일지
-logs/          시그널 로그 (git 추적 제외)
-data/          데이터 스냅샷 (git 추적 제외)
+logs/          실행 로그 (git 추적 제외)
+data/          mas_trade.sqlite3 + snapshots/raw/ (git 추적 제외)
 ```
+
+## 수집
+
+cron은 한 시간마다 깨우기만 하고, 어떤 종목을 돌지는 마지막 수집 시각과 종목별 주기를
+보고 코드가 고른다. 주기는 뉴스 유입 속도 실측으로 배정한다 (종목별 27배까지 차이 난다).
+
+```bash
+python scripts/collect_news.py --dry-run     # 대상만 확인
+python scripts/collect_news.py               # 주기가 된 종목 수집
+python scripts/collect_news.py --status      # 저장 현황과 열린 gap
+python scripts/measure_news_rate.py --apply  # 유입 속도 재측정 후 주기 갱신
+```
+
+수집 실패와 커버리지 미달은 예외가 아니라 gap으로 기록되어 다음 실행의 대상이 된다.
+과거 뉴스는 나중에 살 수 없으므로 조용히 건너뛰는 것이 최악이다.
 
 ## 시작하기
 
