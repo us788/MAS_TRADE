@@ -1,6 +1,6 @@
 """뉴스 수집 — KR(네이버) + US(Finnhub).
 
-cron은 한 시간마다 이 스크립트를 깨우기만 하면 된다. 어떤 종목을 돌지는
+스케줄러는 한 시간마다 이 스크립트를 깨우기만 하면 된다. 어떤 종목을 돌지는
 `collection_runs`의 마지막 수집 시각과 종목별 주기를 보고 여기서 고른다.
 
     python scripts/collect_news.py --dry-run     # 대상만 확인 (호출 없음)
@@ -9,9 +9,13 @@ cron은 한 시간마다 이 스크립트를 깨우기만 하면 된다. 어떤 
     python scripts/collect_news.py --symbol 005930 --force
     python scripts/collect_news.py --status      # 저장 현황과 열린 gap
 
-crontab 예시 (KST 기준, 매시 5분):
-    5 * * * * cd ~/Desktop/2026\\ 개인프로젝트/MAS_TRADE && \\
-              .venv/bin/python scripts/collect_news.py >> logs/collect.log 2>&1
+정기 실행은 cron이 아니라 launchd로 건다(매시 5분). 노트북은 잠들고, cron은 자는
+동안의 실행을 건너뛴 뒤 따라잡지 않는다. launchd의 StartCalendarInterval은 깨어날 때
+밀린 것을 한 번 실행한다. 근거는 docs/journal/2026-09-16.md.
+
+    scripts/install_scheduler.sh            등록 (저장소를 옮긴 뒤에도 다시 돌리면 된다)
+    scripts/install_scheduler.sh --status   등록 상태와 마지막 종료 코드
+    scripts/install_scheduler.sh --run-now  즉시 1회 실행 (검증용)
 """
 import argparse
 import sys

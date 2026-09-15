@@ -68,7 +68,7 @@ data/          mas_trade.sqlite3 + snapshots/raw/ (git 추적 제외)
 
 ## 수집
 
-cron은 한 시간마다 깨우기만 하고, 어떤 종목을 돌지는 마지막 수집 시각과 종목별 주기를
+스케줄러는 한 시간마다 깨우기만 하고, 어떤 종목을 돌지는 마지막 수집 시각과 종목별 주기를
 보고 코드가 고른다. 주기는 뉴스 유입 속도 실측으로 배정한다 (종목별 27배까지 차이 난다).
 
 ```bash
@@ -77,6 +77,22 @@ python scripts/collect_news.py               # 주기가 된 종목 수집
 python scripts/collect_news.py --status      # 저장 현황과 열린 gap
 python scripts/measure_news_rate.py --apply  # 유입 속도 재측정 후 주기 갱신
 ```
+
+### 정기 실행
+
+cron이 아니라 **launchd**로 건다(매시 5분 + 로그인 시). 노트북은 잠들고, cron은 자는
+동안의 실행을 건너뛴 뒤 따라잡지 않는다. launchd는 깨어날 때 밀린 것을 한 번 실행한다.
+
+```bash
+scripts/install_scheduler.sh            # 등록 — 저장소를 옮긴 뒤에도 다시 돌리면 된다
+scripts/install_scheduler.sh --status   # 등록 상태와 마지막 종료 코드
+scripts/install_scheduler.sh --run-now  # 즉시 1회 실행 (검증용)
+tail -f logs/collect.log                # 실행 결과
+```
+
+**저장소를 `~/Desktop`·`~/Documents`·`~/Downloads` 아래에 두면 안 된다.** macOS가 TCC로
+보호하는 폴더라 launchd가 실행 자체를 거부한다(`Operation not permitted`, exit 126).
+실측으로 확인했다 — `docs/journal/2026-09-16.md`.
 
 수집 실패와 커버리지 미달은 예외가 아니라 gap으로 기록되어 다음 실행의 대상이 된다.
 과거 뉴스는 나중에 살 수 없으므로 조용히 건너뛰는 것이 최악이다.
