@@ -200,6 +200,44 @@ class Store:
                 "SELECT market, COUNT(*) AS n FROM news GROUP BY market")}
         return {"total": total, "by_relevance": by_rel, "by_market": by_market}
 
+    def iter_rows(self, market: str | None = None) -> list[dict]:
+        """재분류용 전체 조회. 제목·요약이 DB에 있으므로 재수집 없이 다시 매길 수 있다."""
+        sql = "SELECT symbol, content_hash, market, title, summary, relevance FROM news"
+        params: list = []
+        if market:
+            sql += " WHERE market = ?"
+            params.append(market)
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(sql, params)]
+
+    def update_relevance(self, updates: list[tuple[str, str, str]]) -> int:
+        """(relevance, symbol, content_hash) 목록을 반영한다.
+
+        관련성 규칙은 앞으로도 바뀐다 — 별칭 보강, 매체 화이트리스트, 판정 기준 변경.
+        그때마다 재수집하지 않고 여기서 다시 매긴다. 과거 구간은 다시 받을 수 없으므로
+        **이미 받은 것을 다시 해석할 수 있게 해 두는 것**이 중요하다.
+        """
+        if not updates:
+            return 0
+        with self.connect() as conn:
+            cur = conn.executemany(
+                "UPDATE news SET relevance = ? WHERE symbol = ? AND content_hash = ?",
+                updates)
+            return cur.rowcount
+
+    def relevance_matrix(self) -> list[dict]:
+        """시장 × 등급 × 벤더태깅 교차표. 'none'이 전부 무관 기사라는 오해를 막는다."""
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT market, relevance, vendor_tagged, COUNT(*) AS n "
+                "FROM news GROUP BY market, relevance, vendor_tagged")]
+
+    def primary_count(self) -> dict:
+        with self.connect() as conn:
+            return {r["market"]: r["n"] for r in conn.execute(
+                "SELECT market, COUNT(*) AS n FROM news "
+                "WHERE vendor_tagged = 1 OR relevance = 'title' GROUP BY market")}
+
     # ---- 수집 이력 / 구멍 ----
 
     def record_run(

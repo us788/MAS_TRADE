@@ -183,16 +183,20 @@ def term_matches(term: str, text: str) -> bool:
 
     영문과 한국어를 다르게 다뤄야 한다.
 
-    - **영문·티커는 단어 경계로 맞추고 대소문자를 무시한다.** 부분 문자열로 보면
+    - **영문·티커는 경계를 보고 대소문자를 무시한다.** 부분 문자열로 보면
       'NEE'가 'engineer'에, 'CAT'이 'category'에 걸린다. 대소문자를 구분하면
       제목의 'Nvidia'가 'NVIDIA'와 매칭되지 않는다.
+    - 경계는 `\b`가 아니라 **"앞뒤가 ASCII 영숫자가 아닐 것"** 이다. `\b`는 한글도
+      단어 문자로 보기 때문에, 한국어 기사에서 조사가 영문에 바로 붙는 경우
+      ('SKT가', 'NAVER의') 경계가 성립하지 않아 놓친다.
     - **한국어는 부분 문자열로 본다.** 조사가 바로 붙어('삼성전자는', '기아가')
-      단어 경계가 성립하지 않는다.
+      경계 규칙 자체를 쓸 수 없다.
     """
     if not term:
         return False
     if term.isascii():
-        return re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE) is not None
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])"
+        return re.search(pattern, text, re.IGNORECASE) is not None
     return term in text
 
 

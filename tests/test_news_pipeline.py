@@ -140,6 +140,16 @@ def test_티커가_독립_단어면_매칭된다():
     assert term_matches("CAT", "CAT raises guidance") is True
 
 
+def test_한국어_기사_속_영문_약칭도_조사_뒤에서_매칭된다():
+    # \b는 한글도 단어 문자로 보기 때문에 'SKT가'에서 경계가 성립하지 않는다.
+    # 경계 기준을 "앞뒤가 ASCII 영숫자가 아닐 것"으로 둬야 양쪽이 다 된다.
+    assert term_matches("SKT", "SKT가 RCS 표준 제안") is True
+    assert term_matches("NAVER", "NAVER의 유럽 승부수") is True
+    assert term_matches("SKT", "SKT, 실적 발표") is True
+    # 영문 단어 내부는 여전히 배제한다.
+    assert term_matches("SKT", "ASKTV 방송") is False
+
+
 def test_한국어는_조사가_붙어도_매칭된다():
     # 한국어는 조사가 바로 붙어 단어 경계가 성립하지 않는다.
     assert term_matches("삼성전자", "삼성전자는 오늘 발표했다") is True
@@ -342,3 +352,30 @@ def test_벤더_태깅_기사에도_관련성이_매겨진다():
     item = fparse(row, "NVDA", NOW)
     assert item.vendor_tagged is True
     assert classify_relevance(item, ["NVIDIA", "NVDA"]) is Relevance.SUMMARY
+
+
+def test_저장된_등급을_다시_매길_수_있다():
+    # 관련성 규칙은 앞으로도 바뀐다. 과거 구간은 다시 받을 수 없으므로
+    # 이미 받은 것을 다시 해석할 수 있어야 한다.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.add_news([replace(make(url="a", title="삼성전자 실적"), relevance="none")])
+        rows = store.iter_rows()
+        assert rows[0]["relevance"] == "none"
+        store.update_relevance([("title", rows[0]["symbol"], rows[0]["content_hash"])])
+        assert store.iter_rows()[0]["relevance"] == "title"
+
+
+def test_교차표가_벤더태깅을_구분한다():
+    # 등급만 세면 태깅된 기사가 'none'으로만 보여 오해를 부른다.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.add_news([
+            replace(make(url="a"), relevance="title"),
+            replace(make(url="b"), relevance="none", vendor_tagged=True),
+        ])
+        matrix = {(m["relevance"], m["vendor_tagged"]): m["n"]
+                  for m in store.relevance_matrix()}
+        assert matrix[("title", 0)] == 1
+        assert matrix[("none", 1)] == 1
+        assert store.primary_count()["KR"] == 2   # 둘 다 1차 자료

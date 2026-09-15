@@ -36,13 +36,33 @@ def make_adapter(source: str):
     raise ValueError(f"알 수 없는 소스: {source}")
 
 
+RELEVANCE_ORDER = ("title", "summary", "none")
+
+
 def show_status(store: Store) -> int:
     counts = store.counts()
+    primary = store.primary_count()
     print(f"기사 {counts['total']:,}건")
-    if counts["by_market"]:
-        print("  시장별 ", dict(sorted(counts["by_market"].items())))
-    if counts["by_relevance"]:
-        print("  관련성 ", dict(sorted(counts["by_relevance"].items())))
+    for market, n in sorted(counts["by_market"].items()):
+        print(f"  {market} {n:>6,}  그중 1차 자료 {primary.get(market, 0):>6,}")
+
+    # 등급만 세면 오해를 부른다 — 벤더가 태깅한 기사는 제목에 회사명이 없어도
+    # 1차 자료다. 두 축을 겹쳐 봐야 한다.
+    matrix = store.relevance_matrix()
+    if matrix:
+        print("\n  등급 × 벤더태깅")
+        print(f"    {'':<14}" + "".join(f"{r:>9}" for r in RELEVANCE_ORDER))
+        keys = sorted({(m["market"], m["vendor_tagged"]) for m in matrix})
+        for market, tagged in keys:
+            label = f"{market} {'태깅됨' if tagged else '태깅없음'}"
+            cells = []
+            for rel in RELEVANCE_ORDER:
+                n = sum(m["n"] for m in matrix
+                        if m["market"] == market and m["vendor_tagged"] == tagged
+                        and m["relevance"] == rel)
+                cells.append(f"{n:>9,}" if n else f"{'-':>9}")
+            print(f"    {label:<14}" + "".join(cells))
+        print("    * 태깅됨은 등급과 무관하게 1차 자료로 쓴다 (벤더가 종목을 지정)")
 
     gaps = store.open_gaps()
     print(f"\n열린 gap {len(gaps)}건")
