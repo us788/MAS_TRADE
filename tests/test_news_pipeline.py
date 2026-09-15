@@ -3,6 +3,7 @@
 지키는 것: 시점 정합(known_at), 동명이의 필터, 타임존 정규화, 중복 제거.
 """
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from src.data.news import (
     filter_as_of,
     is_excluded,
 )
-from src.data.storage import SnapshotStore
+from src.data.storage import Store
 
 UTC = timezone.utc
 NOW = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
@@ -164,39 +165,102 @@ def test_원문_도메인을_매체명으로_쓴다():
     assert publisher_from("") == ""
 
 
-# ---- 저장소 ----
+# ---- 저장소 (SQLite) ----
+
+def _store(tmp):
+    return Store(db_path=Path(tmp) / "t.sqlite3", raw_dir=Path(tmp) / "raw")
+
 
 def test_같은_기사를_두번_저장하지_않는다():
     with tempfile.TemporaryDirectory() as tmp:
-        store = SnapshotStore(root=Path(tmp) / "snap", log_dir=Path(tmp) / "logs")
+        store = _store(tmp)
         items = [make(url="http://a/1"), make(url="http://a/2")]
-        first = store.append_news(items)
-        second = store.append_news(items)          # 같은 기사 재수집
+        first = store.add_news(items)
+        second = store.add_news(items)
         assert (first.written, first.skipped_duplicate) == (2, 0)
         assert (second.written, second.skipped_duplicate) == (0, 2)
-        assert len(store.read_news("KR", NOW, "test")) == 2
+
+
+def test_날짜가_바뀌어도_중복이_생기지_않는다():
+    # JSONL 시절의 버그: 중복 검사 범위가 날짜별 파일이라 자정을 넘기면
+    # 같은 기사가 다시 저장됐다. 1시간 주기면 매일 한 번씩 발생한다.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        article = make(url="http://a/1", published=NOW - timedelta(hours=1))
+        store.add_news([replace(article, collected_at=NOW.replace(hour=23, minute=50))])
+        after_midnight = replace(article,
+                                 collected_at=NOW.replace(hour=0, minute=10) + timedelta(days=1))
+        result = store.add_news([after_midnight])
+        assert result.written == 0
+        assert store.counts()["total"] == 1
+
+
+def test_최초_관측_시각이_유지된다():
+    # known_at의 보수적 판정이 collected_at에 기댄다. 나중 값으로 덮으면 안 된다.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        article = make(url="http://a/1")
+        store.add_news([replace(article, collected_at=NOW, relevance="title")])
+        store.add_news([replace(article, collected_at=NOW + timedelta(hours=5),
+                                relevance="title")])
+        rows = store.news_for("X", NOW + timedelta(days=1), 7)
+        assert rows[0]["collected_at"] == NOW.isoformat()
 
 
 def test_다른_종목의_같은_기사는_각각_남는다():
-    # 한 기사가 두 종목에 모두 해당할 수 있다. 종목별로 1건씩이 맞다.
     with tempfile.TemporaryDirectory() as tmp:
-        store = SnapshotStore(root=Path(tmp) / "snap", log_dir=Path(tmp) / "logs")
-        store.append_news([make(url="http://a/1", symbol="005930"),
-                           make(url="http://a/1", symbol="000660")])
-        assert len(store.read_news("KR", NOW, "test")) == 2
+        store = _store(tmp)
+        store.add_news([make(url="http://a/1", symbol="005930"),
+                        make(url="http://a/1", symbol="000660")])
+        assert store.counts()["total"] == 2
+
+
+def test_as_of_이후_기사는_조회되지_않는다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.add_news([
+            replace(make(url="a", published=NOW - timedelta(hours=2)), relevance="title"),
+            replace(make(url="b", published=NOW + timedelta(hours=2),
+                         collected=NOW + timedelta(hours=3)), relevance="title"),
+        ])
+        rows = store.news_for("X", NOW, 7)
+        assert [r["url"] for r in rows] == ["a"]
+
+
+def test_기본_조회는_1차자료만_돌려준다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.add_news([
+            replace(make(url="a"), relevance="title"),
+            replace(make(url="b"), relevance="summary"),
+            replace(make(url="c"), relevance="none", vendor_tagged=True),
+        ])
+        assert {r["url"] for r in store.news_for("X", NOW + timedelta(hours=1), 7)} == {"a", "c"}
+        assert len(store.news_for("X", NOW + timedelta(hours=1), 7, primary_only=False)) == 3
 
 
 def test_수집_실패는_기록으로_남는다():
     with tempfile.TemporaryDirectory() as tmp:
-        store = SnapshotStore(root=Path(tmp) / "snap", log_dir=Path(tmp) / "logs")
+        store = _store(tmp)
         store.record_gap("KR", "naver", "005930", "HTTP 429")
         gaps = store.open_gaps()
         assert len(gaps) == 1 and gaps[0]["symbol"] == "005930"
+        store.resolve_gap(gaps[0]["id"])
+        assert store.open_gaps() == []
+
+
+def test_수집_이력으로_마지막_실행_시각을_안다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        assert store.last_run_at("005930", "naver") is None
+        store.record_run("005930", "naver", ran_at=NOW, oldest_seen=NOW - timedelta(hours=3),
+                         reached_floor=True, pages=2, fetched=200, inserted=180, duplicates=20)
+        assert store.last_run_at("005930", "naver") == NOW
 
 
 def test_원본_응답을_따로_남긴다():
     with tempfile.TemporaryDirectory() as tmp:
-        store = SnapshotStore(root=Path(tmp) / "snap", log_dir=Path(tmp) / "logs")
+        store = _store(tmp)
         path = store.save_raw("naver", "005930", {"items": []}, NOW)
         assert path.exists() and "005930" in path.name
 
