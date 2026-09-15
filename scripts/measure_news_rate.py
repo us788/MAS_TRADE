@@ -9,7 +9,8 @@
 하루 1회로 통일하면 삼성전자는 매일 17시간이 빈다. 그 구멍은 나중에 메울 수 없다.
 
     python scripts/measure_news_rate.py          # 측정만
-    python scripts/measure_news_rate.py --apply  # universe.json에 반영
+    python scripts/measure_news_rate.py --apply  # 반영 (주기 단축만)
+    python scripts/measure_news_rate.py --apply --allow-longer  # 늘리는 것도 허용
 """
 import json
 import sys
@@ -81,10 +82,14 @@ def main() -> int:
         print(f"{holding.name:<20} {len(items):>5} {span_h:>8.1f} {rate:>8.1f} "
               f"{title_pct:>5.0f}% {tier:>4}h")
 
-        # 제목 매칭률이 너무 낮으면 별칭이 부족하다는 뜻이다. 실제 제목을 보여준다.
+        # 제목 매칭률이 낮은 원인은 둘 중 하나다.
+        #   (a) 별칭 부족 — 제목이 다른 표기를 쓴다
+        #   (b) 시황·업계 기사에 본문으로만 딸려 나온다 (정상)
+        # 가르려면 **매칭되지 않은** 제목을 봐야 한다. 실측상 대부분 (b)였다.
         if title_pct < 15:
-            print(f"{'':<20} └ 제목 매칭률이 낮다. 별칭 보강 검토용 표본:")
-            for sample in items[:3]:
+            missed = [i for i in items if not any(n and n in i.title for n in names)]
+            print(f"{'':<20} └ 제목 매칭 낮음. 매칭 안 된 제목 (별칭 부족 vs 시황 기사 판단용):")
+            for sample in missed[:3]:
                 print(f"{'':<22} {sample.title[:56]}")
 
         # 벤더 집계가 비현실적으로 낮으면 쿼리가 너무 좁은 것이다 (다단어 AND).
@@ -107,9 +112,30 @@ def main() -> int:
 
     payload = json.loads(UNIVERSE_PATH.read_text(encoding="utf-8"))
     tiers = {h.symbol: t for h, t, _, _ in rows}
+    relax = "--allow-longer" in sys.argv
+
+    # 측정은 흔들린다 — 같은 종목이 한 시간 사이 25% 차이 났다 (2026-09-15).
+    # 한산한 시간에 재서 주기가 늘어나면 그만큼 구멍이 생기고 되돌릴 수 없다.
+    # 그래서 기본은 **줄이기만** 한다. 늘리려면 --allow-longer 를 명시해야 한다.
+    changed, kept = [], []
     for row in payload["KR"]:
-        if row["symbol"] in tiers:
-            row["collect_every_hours"] = tiers[row["symbol"]]
+        proposed = tiers.get(row["symbol"])
+        if proposed is None:
+            continue
+        current = row.get("collect_every_hours")
+        if current is None or proposed < current or relax:
+            if current != proposed:
+                changed.append(f"{row['name']} {current}h -> {proposed}h")
+            row["collect_every_hours"] = proposed
+        else:
+            kept.append(f"{row['name']} {current}h 유지 (이번 측정 {proposed}h)")
+
+    for line in changed:
+        print(f"  변경 {line}")
+    for line in kept:
+        print(f"  유지 {line}")
+    if kept and not relax:
+        print("  (주기를 늘리려면 --allow-longer. 늘리면 그만큼 구멍이 생길 수 있다)")
     payload.setdefault("changelog", []).append({
         "date": now.strftime("%Y-%m-%d"),
         "change": "뉴스 유입 속도 실측 후 종목별 collect_every_hours 배정",

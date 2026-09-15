@@ -24,6 +24,10 @@
     {
       "date": "2026-09-15",
       "change": "기아·NAVER의 다단어 news_query를 단일어로 교정. 네이버 검색이 다단어를 AND로 묶어 기아 318h/NAVER 801h라는 비현실적 측정치가 나왔다. 동명이의는 news_exclude로 막는다."
+    },
+    {
+      "date": "2026-09-15",
+      "change": "뉴스 유입 속도 실측 후 종목별 collect_every_hours 배정"
     }
   ],
   "US": [
@@ -143,7 +147,7 @@
       "news_require": [
         "삼성전자"
       ],
-      "collect_every_hours": 3
+      "collect_every_hours": 1
     },
     {
       "symbol": "000660",
@@ -154,7 +158,7 @@
       "news_require": [
         "하이닉스"
       ],
-      "collect_every_hours": 3
+      "collect_every_hours": 1
     },
     {
       "symbol": "373220",
@@ -166,7 +170,7 @@
         "LG에너지솔루션",
         "LG엔솔"
       ],
-      "collect_every_hours": 24
+      "collect_every_hours": 6
     },
     {
       "symbol": "207940",
@@ -178,7 +182,7 @@
         "삼성바이오로직스",
         "삼성바이오"
       ],
-      "collect_every_hours": 24
+      "collect_every_hours": 12
     },
     {
       "symbol": "005380",
@@ -190,7 +194,7 @@
         "현대차",
         "현대자동차"
       ],
-      "collect_every_hours": 6
+      "collect_every_hours": 3
     },
     {
       "symbol": "000270",
@@ -205,7 +209,8 @@
         "기아대책",
         "타이거즈",
         "프로야구"
-      ]
+      ],
+      "collect_every_hours": 6
     },
     {
       "symbol": "068270",
@@ -216,7 +221,7 @@
       "news_require": [
         "셀트리온"
       ],
-      "collect_every_hours": 24
+      "collect_every_hours": 12
     },
     {
       "symbol": "105560",
@@ -240,7 +245,8 @@
         "네이버",
         "NAVER"
       ],
-      "news_exclude": []
+      "news_exclude": [],
+      "collect_every_hours": 1
     },
     {
       "symbol": "012450",
@@ -255,7 +261,7 @@
         "이글스",
         "야구"
       ],
-      "collect_every_hours": 24
+      "collect_every_hours": 12
     },
     {
       "symbol": "017670",
@@ -267,7 +273,7 @@
         "SK텔레콤",
         "SKT"
       ],
-      "collect_every_hours": 12
+      "collect_every_hours": 6
     },
     {
       "symbol": "051910",
@@ -289,7 +295,7 @@
       "news_require": [
         "이마트"
       ],
-      "collect_every_hours": 12
+      "collect_every_hours": 6
     },
     {
       "symbol": "329180",
@@ -301,7 +307,7 @@
         "HD현대중공업",
         "현대중공업"
       ],
-      "collect_every_hours": 24
+      "collect_every_hours": 12
     },
     {
       "symbol": "015760",
@@ -313,7 +319,7 @@
         "한국전력",
         "한전"
       ],
-      "collect_every_hours": 12
+      "collect_every_hours": 6
     }
   ]
 }
