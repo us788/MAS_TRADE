@@ -12,7 +12,9 @@
 판단 시점이 12번뿐이라 표본이 부족하지만, 종목 15개 × 12회 = 180건의 시그널로 쪼개면
 통계적으로 말할 수 있는 것이 생긴다.
 
-전체 설계는 [`docs/plan.md`](docs/plan.md) 참고.
+전체 설계는 [`docs/plan.md`](docs/plan.md), 데이터 소스별 한도와 제약은
+[`docs/data-sources.md`](docs/data-sources.md), 날짜별 결정·문제·해결 기록은
+[`docs/journal/`](docs/journal/) 참고.
 
 ## 핵심 원칙
 
@@ -58,7 +60,7 @@ src/
 ├── llm/       LLM 호출 레이어 (DeepSeek, 벤더 교체 가능 / 버전·비용 로깅)
 ├── agents/    분석 에이전트, 논쟁 레이어, 리스크 엔진
 └── eval/      백테스트 하네스, 시그널 채점, 지표
-docs/          기획서
+docs/          기획서, 데이터 소스, 작업 일지
 logs/          시그널 로그 (git 추적 제외)
 data/          데이터 스냅샷 (git 추적 제외)
 ```
