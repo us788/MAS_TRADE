@@ -110,6 +110,26 @@ class NewsItem:
         }
 
 
+@dataclass
+class NewsBatch:
+    """수집 1회의 결과와 **커버리지**.
+
+    reached_floor가 False면 lookback 구간을 다 못 받았다는 뜻이다. 조용히 넘어가면
+    그만큼이 영구 손실이므로 호출부가 gap으로 기록해야 한다.
+    """
+
+    items: list["NewsItem"]
+    pages: int = 0
+    oldest_seen: datetime | None = None
+    reached_floor: bool = True
+    raw: list = field(default_factory=list)
+    """원본 응답 페이지들. 재현성을 위해 그대로 저장한다."""
+
+    @property
+    def primary(self) -> list["NewsItem"]:
+        return [i for i in self.items if i.is_primary]
+
+
 class NewsSource(Protocol):
     """시장별 어댑터가 구현한다. 상위 코드는 이것만 본다."""
 

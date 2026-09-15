@@ -14,7 +14,6 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
@@ -24,6 +23,7 @@ import requests
 from src import config
 from src.data._http import RateLimiter, get_json
 from src.data.news import (
+    NewsBatch,
     NewsItem,
     Relevance,
     classify_relevance,
@@ -36,24 +36,6 @@ from src.data.news import (
 MAX_DISPLAY = 100
 MAX_START = 1000
 MAX_PAGES = MAX_START // MAX_DISPLAY
-
-
-@dataclass
-class NewsBatch:
-    """수집 1회의 결과와 **커버리지**.
-
-    reached_floor가 False면 lookback 구간을 다 못 받았다는 뜻이다.
-    조용히 넘어가면 그만큼이 영구 손실이므로 호출부가 gap으로 기록해야 한다.
-    """
-
-    items: list[NewsItem]
-    pages: int
-    oldest_seen: datetime | None
-    reached_floor: bool
-
-    @property
-    def primary(self) -> list[NewsItem]:
-        return [i for i in self.items if i.is_primary]
 
 
 class NaverNews:
@@ -112,6 +94,7 @@ class NaverNews:
         collected_at = datetime.now(timezone.utc)
 
         items: list[NewsItem] = []
+        raw_pages: list = []
         oldest: datetime | None = None
         pages = 0
         reached = False
@@ -125,6 +108,7 @@ class NaverNews:
                 reached = True   # 더 줄 게 없으면 그 구간은 다 받은 것이다
                 break
             pages += 1
+            raw_pages.append(payload)
 
             for row in rows:
                 item = parse_item(row, symbol, collected_at)
@@ -147,6 +131,7 @@ class NaverNews:
             pages=pages,
             oldest_seen=oldest,
             reached_floor=reached,
+            raw=raw_pages,
         )
 
     def get_news(

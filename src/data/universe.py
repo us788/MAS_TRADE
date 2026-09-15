@@ -25,6 +25,14 @@ class Holding:
     news_query: str
     news_require: tuple[str, ...] = ()
     news_exclude: tuple[str, ...] = ()
+    collect_every_hours: int = 24
+    """수집 주기. KR은 실측으로 배정한다 (scripts/measure_news_rate.py).
+    US(Finnhub)는 날짜 범위 조회가 되어 커버리지 문제가 없으므로 24시간 고정."""
+
+    @property
+    def names(self) -> list[str]:
+        """관련성 판정에 쓸 표기들."""
+        return [self.name, *self.news_require]
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,7 @@ def load_universe(path: Path | None = None) -> Universe:
                 news_query=row.get("news_query") or row["name"],
                 news_require=tuple(row.get("news_require", ())),
                 news_exclude=tuple(row.get("news_exclude", ())),
+                collect_every_hours=int(row.get("collect_every_hours", 24)),
             )
             for row in payload.get(market, [])
         )

@@ -10,7 +10,7 @@ import requests
 
 from src import config
 from src.data._http import RateLimiter, get_json
-from src.data.news import NewsItem, clean_text, filter_as_of, to_utc
+from src.data.news import NewsBatch, NewsItem, clean_text, filter_as_of, to_utc
 
 
 class FinnhubNews:
@@ -36,17 +36,34 @@ class FinnhubNews:
             auth_hint="FINNHUB_API_KEY를 확인하세요.",
         )
 
-    def get_news(
-        self, symbol: str, as_of: datetime, lookback_days: int = 7
-    ) -> list[NewsItem]:
+    def collect(
+        self, symbol: str, as_of: datetime, lookback_days: float = 1.0, **_
+    ) -> NewsBatch:
+        """날짜 범위로 직접 조회한다.
+
+        네이버와 달리 구간을 지정할 수 있어 **커버리지 미달이 구조적으로 없다**.
+        그래서 reached_floor는 항상 True다 — 수집 주기도 하루 1회로 충분하다.
+        """
         as_of = to_utc(as_of)
-        # to는 하루 넉넉히 잡고, 경계는 known_at으로 정확히 자른다.
         payload = self.fetch_raw(
             symbol, as_of - timedelta(days=lookback_days), as_of + timedelta(days=1)
-        )
+        ) or []
         collected_at = datetime.now(timezone.utc)
-        items = [parse_item(row, symbol, collected_at) for row in payload or []]
-        return filter_as_of([i for i in items if i], as_of, lookback_days)
+        parsed = [parse_item(row, symbol, collected_at) for row in payload]
+        items = [i for i in parsed if i]
+        oldest = min((i.published_at for i in items), default=None)
+        return NewsBatch(
+            items=filter_as_of(items, as_of, lookback_days),
+            pages=1,
+            oldest_seen=oldest,
+            reached_floor=True,
+            raw=[payload],
+        )
+
+    def get_news(
+        self, symbol: str, as_of: datetime, lookback_days: int = 7, **kwargs
+    ) -> list[NewsItem]:
+        return self.collect(symbol, as_of, lookback_days, **kwargs).primary
 
 
 def parse_item(row: dict, symbol: str, collected_at: datetime) -> NewsItem | None:
