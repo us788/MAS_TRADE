@@ -10,7 +10,17 @@ import requests
 
 from src import config
 from src.data._http import RateLimiter, get_json
-from src.data.news import NewsBatch, NewsItem, clean_text, filter_as_of, to_utc
+from dataclasses import replace
+
+from src.data.news import (
+    NewsBatch,
+    NewsItem,
+    classify_relevance,
+    clean_text,
+    filter_as_of,
+    is_excluded,
+    to_utc,
+)
 
 
 class FinnhubNews:
@@ -37,7 +47,14 @@ class FinnhubNews:
         )
 
     def collect(
-        self, symbol: str, as_of: datetime, lookback_days: float = 1.0, **_
+        self,
+        symbol: str,
+        as_of: datetime,
+        lookback_days: float = 1.0,
+        *,
+        names: list[str] | None = None,
+        exclude: list[str] | None = None,
+        **_,
     ) -> NewsBatch:
         """날짜 범위로 직접 조회한다.
 
@@ -50,8 +67,17 @@ class FinnhubNews:
         ) or []
         collected_at = datetime.now(timezone.utc)
         parsed = [parse_item(row, symbol, collected_at) for row in payload]
-        items = [i for i in parsed if i]
-        oldest = min((i.published_at for i in items), default=None)
+        all_items = [i for i in parsed if i]
+        oldest = min((i.published_at for i in all_items), default=None)
+
+        # 벤더가 티커로 태깅해 줘도 관련성은 따로 매긴다. 태깅은 "이 기사가 그 종목에
+        # 관한 것"을 보장하지 않는다 (NVDA 250건 중 제목 매칭 17%, 2026-09-15 실측).
+        items = []
+        for item in all_items:
+            if is_excluded(item, list(exclude or [])):
+                continue
+            items.append(replace(item,
+                                 relevance=classify_relevance(item, list(names or [])).value))
         return NewsBatch(
             items=filter_as_of(items, as_of, lookback_days),
             pages=1,

@@ -16,6 +16,7 @@ from src.data.news import (
     clean_text,
     filter_as_of,
     is_excluded,
+    term_matches,
 )
 from src.data.storage import Store
 
@@ -117,6 +118,36 @@ def test_한화_야구_기사는_배제된다():
 
 def test_배제어가_없으면_통과():
     assert is_excluded(make(title="기아, 3분기 판매량 증가"), ["기아대책"]) is False
+
+
+# ---- 표기 매칭 ----
+# 영문과 한국어를 다르게 다뤄야 한다. US를 붙이기 전까지 드러나지 않던 문제.
+
+def test_영문은_대소문자를_무시한다():
+    # 제목은 'Nvidia', 유니버스는 'NVIDIA'. 구분하면 전부 놓친다.
+    assert term_matches("NVIDIA", "Nvidia stock jumps") is True
+    assert term_matches("Apple", "APPLE'S new chip") is True
+
+
+def test_짧은_티커가_일반_단어에_걸리지_않는다():
+    # 부분 문자열이면 NEE가 engineer에, CAT이 category에 걸린다.
+    assert term_matches("NEE", "The engineer said") is False
+    assert term_matches("CAT", "New category launched") is False
+
+
+def test_티커가_독립_단어면_매칭된다():
+    assert term_matches("NEE", "NEE beats estimates") is True
+    assert term_matches("CAT", "CAT raises guidance") is True
+
+
+def test_한국어는_조사가_붙어도_매칭된다():
+    # 한국어는 조사가 바로 붙어 단어 경계가 성립하지 않는다.
+    assert term_matches("삼성전자", "삼성전자는 오늘 발표했다") is True
+    assert term_matches("기아", "기아가 판매 증가") is True
+
+
+def test_빈_표기는_매칭되지_않는다():
+    assert term_matches("", "아무 텍스트") is False
 
 
 # ---- 관련성 등급 ----
@@ -291,3 +322,23 @@ def test_batch의_primary는_TITLE과_벤더태깅만():
     ]
     batch = NewsBatch(items=items, pages=1, oldest_seen=NOW, reached_floor=True)
     assert [i.url for i in batch.primary] == ["a", "c"]
+
+
+def test_US는_티커도_표기_후보다():
+    from src.data.universe import Holding
+    us = Holding("NVDA", "NVIDIA", "Technology", "US", "mktcap", "NVDA")
+    kr = Holding("005930", "삼성전자", "반도체", "KR", "mktcap", "삼성전자", ("삼성전자",))
+    assert "NVDA" in us.names
+    # KR 종목코드는 제목에 나오지 않으므로 넣지 않는다.
+    assert "005930" not in kr.names
+
+
+def test_벤더_태깅_기사에도_관련성이_매겨진다():
+    # 태깅은 "이 기사가 그 종목에 관한 것"을 보장하지 않는다.
+    # NVDA 250건 중 제목 매칭은 17%였다 (2026-09-15 실측).
+    from src.data.finnhub_news import parse_item as fparse
+    row = {"datetime": 1789392614, "headline": "Chip stocks rally on AI demand",
+           "summary": "Nvidia led gains", "url": "http://a", "source": "Reuters"}
+    item = fparse(row, "NVDA", NOW)
+    assert item.vendor_tagged is True
+    assert classify_relevance(item, ["NVIDIA", "NVDA"]) is Relevance.SUMMARY

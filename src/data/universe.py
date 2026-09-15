@@ -31,8 +31,15 @@ class Holding:
 
     @property
     def names(self) -> list[str]:
-        """관련성 판정에 쓸 표기들."""
-        return [self.name, *self.news_require]
+        """관련성 판정에 쓸 표기들.
+
+        US는 티커도 후보에 넣는다 — 영문 기사 제목은 'NVDA'처럼 티커로 쓰는 일이
+        흔하다. KR 종목코드(6자리 숫자)는 제목에 나오지 않으므로 넣지 않는다.
+        """
+        terms = [self.name, *self.news_require]
+        if self.market == "US":
+            terms.append(self.symbol)
+        return terms
 
 
 @dataclass(frozen=True)

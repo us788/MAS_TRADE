@@ -178,22 +178,44 @@ def filter_as_of(
     return sorted(kept, key=lambda i: i.known_at, reverse=True)
 
 
+def term_matches(term: str, text: str) -> bool:
+    """종목 표기가 텍스트에 나타나는가.
+
+    영문과 한국어를 다르게 다뤄야 한다.
+
+    - **영문·티커는 단어 경계로 맞추고 대소문자를 무시한다.** 부분 문자열로 보면
+      'NEE'가 'engineer'에, 'CAT'이 'category'에 걸린다. 대소문자를 구분하면
+      제목의 'Nvidia'가 'NVIDIA'와 매칭되지 않는다.
+    - **한국어는 부분 문자열로 본다.** 조사가 바로 붙어('삼성전자는', '기아가')
+      단어 경계가 성립하지 않는다.
+    """
+    if not term:
+        return False
+    if term.isascii():
+        return re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE) is not None
+    return term in text
+
+
 def is_excluded(item: NewsItem, exclude: list[str]) -> bool:
     """동명이의 배제. 걸리면 등급을 매기지 않고 버린다 ('한화' -> 야구단)."""
     haystack = f"{item.title} {item.summary}"
-    return any(term and term in haystack for term in exclude)
+    return any(term_matches(term, haystack) for term in exclude)
 
 
 def classify_relevance(item: NewsItem, names: list[str]) -> Relevance:
     """제목에 있으면 TITLE, 요약에만 있으면 SUMMARY, 둘 다 없으면 NONE.
 
-    names가 비어 있으면 판정 근거가 없으므로 NONE. 벤더가 태깅하는 소스는
-    relevance 대신 vendor_tagged로 신뢰도를 표시한다.
+    names가 비어 있으면 판정 근거가 없으므로 NONE.
+
+    벤더가 티커로 태깅하는 소스(Finnhub)에도 **이 판정을 함께 매긴다.** 태깅이
+    관련성을 보장하지 않기 때문이다 — 실측(2026-09-15) NVDA 250건 중 제목에
+    회사명이 있는 것은 17%였다. 태깅 여부는 vendor_tagged가 따로 들고 있으므로
+    두 신호를 나중에 갈라 볼 수 있다.
     """
     if not names:
         return Relevance.NONE
-    if any(name and name in item.title for name in names):
+    if any(term_matches(name, item.title) for name in names):
         return Relevance.TITLE
-    if any(name and name in item.summary for name in names):
+    if any(term_matches(name, item.summary) for name in names):
         return Relevance.SUMMARY
     return Relevance.NONE
