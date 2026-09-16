@@ -1,147 +1,195 @@
 #!/bin/bash
 #
-# launchd 스케줄러 등록 — 매시 5분에 scripts/run_collect.sh를 돌린다.
+# launchd 스케줄러 등록. 작업 두 개를 관리한다.
 #
-# 저장소를 옮긴 뒤에는 이 스크립트를 다시 돌리기만 하면 된다. plist에 박힌
-# 경로를 지금 위치로 다시 써서 재등록한다.
+#   collect    매시 5분     뉴스 수집 (scripts/run_collect.sh)
+#   baseline   매주 수 07:00  베이스라인 시그널 (scripts/run_baseline.sh)
 #
-#   scripts/install_scheduler.sh              등록 (또는 재등록)
-#   scripts/install_scheduler.sh --status     현재 상태
-#   scripts/install_scheduler.sh --run-now    즉시 1회 실행 (검증용)
-#   scripts/install_scheduler.sh --uninstall  해제
+# 저장소를 옮긴 뒤에는 이 스크립트를 다시 돌리기만 하면 된다. plist에 박힌 경로를
+# 지금 위치로 다시 써서 재등록한다.
+#
+#   scripts/install_scheduler.sh                 둘 다 등록 (또는 재등록)
+#   scripts/install_scheduler.sh --status        상태
+#   scripts/install_scheduler.sh --run-now collect    즉시 1회 (검증용)
+#   scripts/install_scheduler.sh --uninstall [job]    해제
 #
 # cron이 아니라 launchd를 쓰는 이유는 docs/journal/2026-09-16.md.
+#
+# **StartCalendarInterval은 시스템 현지 시간 기준이다.** 이 맥이 KST이므로
+# Hour=7은 07:00 KST다. 맥의 시간대를 바꾸면 스케줄도 따라 움직인다.
 
 set -uo pipefail
 
-LABEL="com.ys.mastrade.collect"
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
-TARGET="$DOMAIN/$LABEL"
+JOBS=(collect baseline)
 
-xml_escape() {
-    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+# 작업별 정의 ------------------------------------------------------------
+label_of()   { echo "com.ys.mastrade.$1"; }
+script_of()  { case "$1" in collect) echo "run_collect.sh";; baseline) echo "run_baseline.sh";; esac; }
+runatload_of() {
+    # 베이스라인은 돈이 나간다. 로그인마다 부르지 않는다.
+    # 잠든 사이 밀린 실행은 StartCalendarInterval이 깨어날 때 한 번 돌려 주므로
+    # RunAtLoad 없이도 따라잡기는 된다.
+    case "$1" in collect) echo "true";; baseline) echo "false";; esac
+}
+schedule_of() {
+    case "$1" in
+        collect)  printf '        <key>Minute</key>\n        <integer>5</integer>\n' ;;
+        baseline) printf '        <key>Weekday</key>\n        <integer>3</integer>\n'
+                  printf '        <key>Hour</key>\n        <integer>7</integer>\n'
+                  printf '        <key>Minute</key>\n        <integer>0</integer>\n' ;;
+    esac
+}
+describe_of() {
+    case "$1" in
+        collect)  echo "매시 5분 (+ 로그인 시)" ;;
+        baseline) echo "매주 수요일 07:00 KST" ;;
+    esac
 }
 
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+plist_path() { echo "$HOME/Library/LaunchAgents/$(label_of "$1").plist"; }
+
+valid_job() {
+    local j
+    for j in "${JOBS[@]}"; do [ "$j" = "$1" ] && return 0; done
+    echo "알 수 없는 작업: $1 (${JOBS[*]})" >&2
+    return 1
+}
+
+# ----------------------------------------------------------------------
+
 do_uninstall() {
-    launchctl bootout "$TARGET" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null
-    rm -f "$PLIST"
-    echo "해제했다: $LABEL"
-    echo "  plist 삭제: $PLIST"
-    echo "  수집은 이제 수동으로만 돈다."
+    local job label plist
+    for job in "$@"; do
+        label="$(label_of "$job")"; plist="$(plist_path "$job")"
+        launchctl bootout "$DOMAIN/$label" 2>/dev/null || launchctl unload "$plist" 2>/dev/null
+        rm -f "$plist"
+        echo "해제: $label"
+    done
 }
 
 do_status() {
-    echo "라벨   $LABEL"
-    echo "plist  $PLIST"
-    if [ ! -f "$PLIST" ]; then
-        echo "상태   미설치"
-        return 1
+    local job label plist rc=0
+    for job in "${JOBS[@]}"; do
+        label="$(label_of "$job")"; plist="$(plist_path "$job")"
+        echo "── $job ($(describe_of "$job"))"
+        echo "   라벨   $label"
+        if [ ! -f "$plist" ]; then
+            echo "   상태   미설치"; rc=1; continue
+        fi
+        echo "   경로   $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$plist" 2>/dev/null)"
+        if launchctl print "$DOMAIN/$label" >/dev/null 2>&1; then
+            echo "   상태   등록됨"
+            launchctl print "$DOMAIN/$label" 2>/dev/null \
+                | grep -E "last exit code =|runs =" | sed 's/^[[:space:]]*/          /'
+        else
+            echo "   상태   plist는 있으나 launchd에 등록되지 않았다 — 인자 없이 다시 돌린다"
+            rc=1
+        fi
+    done
+    return $rc
+}
+
+install_job() {
+    local job="$1" label plist wrapper repo_xml
+    label="$(label_of "$job")"; plist="$(plist_path "$job")"
+    wrapper="$REPO/scripts/$(script_of "$job")"
+    if [ ! -f "$wrapper" ]; then
+        echo "래퍼가 없다: $wrapper" >&2; return 1
     fi
-    echo "경로   $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$PLIST" 2>/dev/null)"
-    if launchctl print "$TARGET" >/dev/null 2>&1; then
-        echo "상태   등록됨"
-        launchctl print "$TARGET" 2>/dev/null \
-            | grep -E "state =|last exit code =|runs =" \
-            | sed 's/^[[:space:]]*/       /'
-    else
-        echo "상태   plist는 있으나 launchd에 등록되지 않았다 — 이 스크립트를 인자 없이 다시 돌린다"
-        return 1
+    chmod +x "$wrapper"
+    repo_xml="$(xml_escape "$REPO")"
+
+    {
+        cat <<PLIST_HEAD
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$label</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$repo_xml/scripts/$(script_of "$job")</string>
+    </array>
+
+    <!-- 자고 있었으면 깨어날 때 한 번 실행된다(밀린 건 하나로 합쳐진다).
+         cron에는 없는 동작이고, 노트북에서 launchd를 고른 이유가 이것이다.
+         시스템 현지 시간(KST) 기준이다. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+PLIST_HEAD
+        schedule_of "$job"
+        cat <<PLIST_TAIL
+    </dict>
+
+    <key>RunAtLoad</key>
+    <$(runatload_of "$job")/>
+
+    <!-- 래퍼가 자체 로그를 쓴다. 여기 찍히는 건 래퍼가 시작조차 못 했을 때다. -->
+    <key>StandardOutPath</key>
+    <string>$repo_xml/logs/launchd.$job.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>$repo_xml/logs/launchd.$job.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>$repo_xml</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+PLIST_TAIL
+    } > "$plist"
+
+    if ! plutil -lint "$plist" >/dev/null; then
+        echo "plist가 올바르지 않다: $plist" >&2; return 1
     fi
+    launchctl bootout "$DOMAIN/$label" 2>/dev/null
+    if ! launchctl bootstrap "$DOMAIN" "$plist" 2>/dev/null; then
+        launchctl load -w "$plist" 2>/dev/null || {
+            echo "등록 실패: $label" >&2; return 1; }
+    fi
+    launchctl enable "$DOMAIN/$label" 2>/dev/null
+    echo "등록: $label  —  $(describe_of "$job")"
+    return 0
 }
 
 case "${1:-}" in
-    --uninstall) do_uninstall; exit 0 ;;
-    --status)    do_status;    exit $? ;;
+    --uninstall)
+        shift
+        if [ $# -eq 0 ]; then do_uninstall "${JOBS[@]}"; else valid_job "$1" && do_uninstall "$1"; fi
+        exit $? ;;
+    --status) do_status; exit $? ;;
     --run-now)
-        echo "즉시 1회 실행한다 (launchd를 통해 — 권한 조건이 실제 예약 실행과 같다)"
-        launchctl kickstart -p "$TARGET" || {
+        shift
+        [ $# -eq 1 ] || { echo "사용법: --run-now {${JOBS[*]}}" >&2; exit 2; }
+        valid_job "$1" || exit 2
+        echo "즉시 1회 실행 (launchd 경유 — 권한 조건이 예약 실행과 같다)"
+        launchctl kickstart -p "$DOMAIN/$(label_of "$1")" || {
             echo "실패 — 먼저 인자 없이 돌려 등록한다" >&2; exit 1; }
         exit 0 ;;
     "") ;;
     *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
 esac
 
-# ---- 등록 ----
-
-WRAPPER="$REPO/scripts/run_collect.sh"
-if [ ! -f "$WRAPPER" ]; then
-    echo "래퍼가 없다: $WRAPPER" >&2
-    exit 1
-fi
-chmod +x "$WRAPPER"
-
 mkdir -p "$HOME/Library/LaunchAgents" "$REPO/logs"
+fail=0
+for job in "${JOBS[@]}"; do install_job "$job" || fail=1; done
 
-REPO_XML="$(xml_escape "$REPO")"
-
-cat > "$PLIST" <<PLIST_EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$LABEL</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>$REPO_XML/scripts/run_collect.sh</string>
-    </array>
-
-    <!-- 매시 5분. 자고 있었으면 깨어날 때 한 번 실행된다(밀린 건 하나로 합쳐진다).
-         cron에는 없는 동작이고, 노트북에서 launchd를 고른 이유가 이것이다. -->
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Minute</key>
-        <integer>5</integer>
-    </dict>
-
-    <!-- 로그인/재부팅 직후에도 한 번 돈다. 어떤 종목을 실제로 돌릴지는
-         collect_news.py가 마지막 수집 시각을 보고 정하므로 중복 호출이 되지 않는다. -->
-    <key>RunAtLoad</key>
-    <true/>
-
-    <!-- 래퍼가 자체 로그를 쓴다. 여기 찍히는 건 래퍼가 시작조차 못 했을 때다. -->
-    <key>StandardOutPath</key>
-    <string>$REPO_XML/logs/launchd.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>$REPO_XML/logs/launchd.err.log</string>
-
-    <key>WorkingDirectory</key>
-    <string>$REPO_XML</string>
-
-    <key>ProcessType</key>
-    <string>Background</string>
-</dict>
-</plist>
-PLIST_EOF
-
-if ! plutil -lint "$PLIST" >/dev/null; then
-    echo "plist가 올바르지 않다: $PLIST" >&2
-    exit 1
-fi
-
-launchctl bootout "$TARGET" 2>/dev/null
-if ! launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
-    launchctl load -w "$PLIST" 2>/dev/null || {
-        echo "등록 실패 — launchctl bootstrap/load 모두 거부됐다" >&2
-        exit 1
-    }
-fi
-launchctl enable "$TARGET" 2>/dev/null
-
-echo "등록했다: $LABEL"
-echo "  저장소   $REPO"
-echo "  plist    $PLIST"
-echo "  주기     매시 5분 (+ 로그인 시)"
-echo "  로그     $REPO/logs/collect.log"
+echo
+echo "저장소   $REPO"
+echo "로그     $REPO/logs/collect.log · $REPO/logs/baseline.log"
 echo
 echo "검증"
-echo "  scripts/install_scheduler.sh --run-now     지금 1회 돌려본다"
-echo "  tail -f logs/collect.log                   결과를 본다"
-echo "  scripts/install_scheduler.sh --status      등록 상태와 마지막 종료 코드"
+echo "  scripts/install_scheduler.sh --status"
+echo "  scripts/install_scheduler.sh --run-now collect"
+echo "  tail -f logs/collect.log"
 echo
-echo "logs/collect.log가 아예 안 생기면 launchd가 한 번도 실행하지 못한 것이고,"
+echo "logs/*.log가 아예 안 생기면 launchd가 한 번도 실행하지 못한 것이고,"
 echo "Permission denied가 찍히면 TCC 문제다 (저장소를 Desktop 밖으로 옮긴다)."
+exit $fail

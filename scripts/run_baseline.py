@@ -26,6 +26,7 @@ from src.data.universe import load_universe
 
 KST = ZoneInfo("Asia/Seoul")
 SIGNAL_HOUR = 7          # harness.md 2절
+SIGNAL_WEEKDAY = 2       # 수요일. 기획서 9.1절 — 요일을 고정해야 구간 간 비교가 된다
 
 
 def default_as_of() -> datetime:
@@ -33,6 +34,24 @@ def default_as_of() -> datetime:
     now = datetime.now(KST)
     base = now.replace(hour=SIGNAL_HOUR, minute=0, second=0, microsecond=0)
     return base if now >= base else base - timedelta(days=1)
+
+
+def weekly_as_of(now: datetime | None = None) -> datetime:
+    """직전(또는 오늘)의 고정 요일 KST 07:00으로 **스냅**한다.
+
+    launchd는 잠든 사이 밀린 실행을 깨어날 때 돌린다. 그때 `default_as_of()`를 쓰면
+    실행된 날 기준이 되어 **요일 고정이 깨진다.** 기획서 9.1절이 요일·시각 고정을
+    요구하는 이유는 구간 간 비교 가능성이므로, 늦게 실행되더라도 as_of는 원래 요일에
+    맞춘다. 그 시점 데이터만 보게 되니 룩어헤드도 없다.
+
+    실제 실행 시각은 `runs.started_at`에 따로 남는다 — 얼마나 늦었는지는 거기서 본다.
+    """
+    now = now or datetime.now(KST)
+    base = now.replace(hour=SIGNAL_HOUR, minute=0, second=0, microsecond=0)
+    if now < base:
+        base -= timedelta(days=1)
+    back = (base.weekday() - SIGNAL_WEEKDAY) % 7
+    return base - timedelta(days=back)
 
 
 def show_status(store: SignalStore) -> int:
@@ -62,6 +81,9 @@ def main() -> int:
     ap.add_argument("--as-of", dest="as_of", default=None,
                     help="ISO 타임스탬프. 기본은 오늘 KST 07:00")
     ap.add_argument("--limit", type=int, default=None, help="종목 수 제한 (검증용)")
+    ap.add_argument("--weekly", action="store_true",
+                    help="as_of를 직전 고정 요일 07:00 KST로 스냅하고, 이미 돌린 "
+                         "시점이면 건너뛴다. launchd 주간 작업이 쓴다")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--status", action="store_true")
     args = ap.parse_args()
@@ -70,7 +92,12 @@ def main() -> int:
     if args.status:
         return show_status(store)
 
-    as_of = (datetime.fromisoformat(args.as_of) if args.as_of else default_as_of())
+    if args.weekly:
+        as_of = weekly_as_of()
+    elif args.as_of:
+        as_of = datetime.fromisoformat(args.as_of)
+    else:
+        as_of = default_as_of()
     if as_of.tzinfo is None:
         print("--as-of는 타임존이 있어야 합니다 (예: 2026-09-15T16:00+09:00)", file=sys.stderr)
         return 2
@@ -81,6 +108,9 @@ def main() -> int:
     total_ok = total = 0
 
     for market in markets:
+        if args.weekly and store.has_successful_run("baseline", market, as_of):
+            print(f"{market} {as_of.isoformat()}: 이미 돌렸습니다. 건너뜁니다.")
+            continue
         contexts = builder.build_market(market, as_of)
         if args.limit:
             contexts = contexts[:args.limit]
@@ -113,9 +143,13 @@ def main() -> int:
         total_ok += out["succeeded"]
         total += out["attempted"]
 
-    if not args.dry_run:
-        print(f"\n합계 {total_ok}/{total}")
-        show_status(store)
+    if args.dry_run:
+        return 0
+    if total == 0:
+        print("돌릴 것이 없습니다.")
+        return 0
+    print(f"\n합계 {total_ok}/{total}")
+    show_status(store)
     return 0 if total_ok == total else 1
 
 

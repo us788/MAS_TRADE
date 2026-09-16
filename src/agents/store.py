@@ -187,6 +187,21 @@ class SignalStore:
             )
         return RunHandle(run_id, kind, market, as_of)
 
+    def has_successful_run(self, kind: str, market: str, as_of: datetime) -> bool:
+        """같은 (종류, 시장, 시점)을 이미 성공적으로 돌렸는가.
+
+        launchd는 잠든 사이 밀린 실행을 깨어날 때 한 번 돌리고, `RunAtLoad`도 있어서
+        같은 시점이 두 번 불릴 수 있다. 시그널이 중복되면 표본 수가 부풀고 채점이
+        오염되므로 실행 전에 확인한다.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM runs WHERE kind = ? AND market = ? AND as_of = ?"
+                " AND succeeded > 0 LIMIT 1",
+                (kind, market, as_of.isoformat()),
+            ).fetchone()
+        return row is not None
+
     def finish_run(self, run: RunHandle, attempted: int, succeeded: int,
                    notes: str | None = None) -> None:
         with self.connect() as conn:

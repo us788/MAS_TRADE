@@ -1,0 +1,99 @@
+#!/bin/bash
+#
+# 베이스라인 시그널 생성 래퍼 — launchd가 주 1회 이 스크립트를 부른다.
+#
+# 뉴스 수집(run_collect.sh)과 다른 점이 둘 있다.
+#
+# 1. **주 1회다.** 기획서 9.1절이 고정 요일·시각을 요구한다 — 요일이 흔들리면
+#    구간 간 비교가 깨진다. `--weekly`가 as_of를 직전 수요일 07:00 KST로 스냅하므로
+#    늦게 깨어나도 요일은 유지된다.
+# 2. **돈이 나간다.** 30종목 1회에 약 $0.5다. 중복 실행은 비용이자 표본 오염이므로
+#    `--weekly`가 이미 돌린 시점을 건너뛴다.
+#
+# 자기 위치에서 저장소 루트를 찾는다. 저장소를 옮겨도 깨지지 않는다.
+
+set -uo pipefail
+
+REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+PYTHON="$REPO/.venv/bin/python"
+LOG_DIR="$REPO/logs"
+LOG="$LOG_DIR/baseline.log"
+LOCK="$LOG_DIR/.baseline.lock"
+
+MAX_LOG_BYTES=$((10 * 1024 * 1024))
+LOG_KEEP=3
+DISK_ABORT_GB=1
+# LLM 호출이 30건 × 최대 수십 초라 한 판이 30분을 넘을 수 있다. 수집보다 길게 잡는다.
+LOCK_STALE_SECONDS=7200
+
+mkdir -p "$LOG_DIR"
+
+log() {
+    printf '%s  %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG"
+}
+
+rotate_log() {
+    [ -f "$LOG" ] || return 0
+    local size i
+    size=$(stat -f%z "$LOG" 2>/dev/null || echo 0)
+    [ "$size" -lt "$MAX_LOG_BYTES" ] && return 0
+    for (( i = LOG_KEEP - 1; i >= 1; i-- )); do
+        [ -f "$LOG.$i" ] && mv -f "$LOG.$i" "$LOG.$((i + 1))"
+    done
+    mv -f "$LOG" "$LOG.1"
+}
+
+acquire_lock() {
+    if mkdir "$LOCK" 2>/dev/null; then
+        return 0
+    fi
+    local now mtime age
+    now=$(date +%s)
+    mtime=$(stat -f%m "$LOCK" 2>/dev/null || echo "$now")
+    age=$(( now - mtime ))
+    if [ "$age" -gt "$LOCK_STALE_SECONDS" ]; then
+        log "WARN  락이 ${age}초째 잡혀 있다 — 죽은 것으로 보고 해제한다"
+        rm -rf "$LOCK"
+        mkdir "$LOCK" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+rotate_log
+log "───── 베이스라인 시작 (pid $$)  repo=$REPO"
+
+if [ ! -x "$PYTHON" ]; then
+    log "FAIL  venv python이 없다: $PYTHON"
+    exit 1
+fi
+if [ ! -f "$REPO/.env" ]; then
+    log "FAIL  .env가 없다 — DEEPSEEK_API_KEY 없이는 호출할 수 없다"
+    exit 1
+fi
+
+FREE=$(df -g "$REPO" 2>/dev/null | tail -1 | awk '{print $4}')
+if [ -n "${FREE:-}" ] && [ "$FREE" -lt "$DISK_ABORT_GB" ]; then
+    log "ABORT 디스크 여유 ${FREE}GB — 쓰기가 깨질 수 있어 실행하지 않는다"
+    exit 1
+fi
+
+if ! acquire_lock; then
+    log "SKIP  이전 실행이 아직 돌고 있다"
+    exit 0
+fi
+trap 'rm -rf "$LOCK"' EXIT
+
+cd "$REPO" || { log "FAIL  cd 실패: $REPO"; exit 1; }
+
+"$PYTHON" scripts/run_baseline.py --weekly >> "$LOG" 2>&1
+STATUS=$?
+
+if [ "$STATUS" -eq 0 ]; then
+    log "───── 완료 (성공)"
+else
+    log "───── 완료 (실패 status=$STATUS)"
+    log "      위에 Permission denied가 있으면 TCC 문제다 (저장소 위치 확인)."
+    log "      401/403이면 DEEPSEEK_API_KEY를, 429면 한도를 확인한다."
+fi
+
+exit "$STATUS"
