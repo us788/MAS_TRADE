@@ -55,6 +55,8 @@ class LLMCall:
     estimated_cost_usd: float | None
     """단가표에 없는 모델이면 None. 모르면 0이 아니라 모른다고 기록한다."""
     finish_reason: str | None
+    reasoning_tokens: int = 0
+    """실제로 쓰인 추론 토큰. 요청한 모드와 실제 동작이 어긋나면 여기서 드러난다."""
 
 
 def build_messages(
@@ -113,6 +115,7 @@ class LLMClient:
         prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
         completion_tokens = getattr(usage, "completion_tokens", 0) or 0
         cached_tokens = _cached_tokens(usage)
+        reasoning_tokens = _reasoning_tokens(usage, response)
 
         record = LLMCall(
             call_id=str(uuid.uuid4()),
@@ -134,6 +137,7 @@ class LLMClient:
                 at=called_at,
             ),
             finish_reason=response.choices[0].finish_reason,
+            reasoning_tokens=reasoning_tokens,
         )
         return response.choices[0].message.content or "", record
 
@@ -142,10 +146,33 @@ def _thinking_kwargs(thinking: bool) -> dict[str, Any]:
     """thinking / non-thinking 모드 전환 지점.
 
     벤더가 이 스위치의 파라미터명을 바꿀 수 있으므로 **한 곳에만** 둔다.
-    TODO(구현 착수 시): 현행 DeepSeek 문서에서 정확한 필드명을 확인해 채운다.
-    확인 전에는 아무것도 보내지 않고 벤더 기본값을 쓴다.
+
+    2026-09-16 실제 호출로 확인한 것:
+
+    - OpenAI SDK에서는 `extra_body`로 넘긴다 — `{"thinking": {"type": "enabled"}}`
+    - **아무것도 보내지 않으면 thinking이 켜진 상태가 기본이다.** 그래서 반드시
+      명시적으로 disabled를 보내야 한다. 이전 구현은 빈 dict를 돌려줬고,
+      `thinking=False` 호출이 조용히 thinking 모드로 돌고 있었다 —
+      기획서 4.1절(스크리닝·포맷 정리는 non-thinking)과 어긋나고 비용도 더 든다
+    - `reasoning_effort="none"`도 같은 효과지만, 두 스위치를 섞지 않는다
     """
-    return {}
+    return {"extra_body": {"thinking": {"type": "enabled" if thinking else "disabled"}}}
+
+
+def _reasoning_tokens(usage: Any, response: Any) -> int:
+    """추론 토큰 수. 필드가 없으면 reasoning_content 존재 여부로 대체 추정한다.
+
+    "non-thinking으로 요청했는데 추론이 돌았다"를 사후에 알아채기 위한 장치다.
+    """
+    details = getattr(usage, "completion_tokens_details", None)
+    value = getattr(details, "reasoning_tokens", None)
+    if isinstance(value, int):
+        return value
+    try:
+        content = response.choices[0].message.reasoning_content
+    except (AttributeError, IndexError):
+        return 0
+    return len(content) if content else 0
 
 
 def _cached_tokens(usage: Any) -> int:
