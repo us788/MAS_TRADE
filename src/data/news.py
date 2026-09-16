@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -145,8 +146,69 @@ class NewsSource(Protocol):
 # ---- 정규화 헬퍼 ----
 
 
+# 공백으로 취급할 제어문자. 나머지 Cc/Cf는 지운다.
+_KEEP_AS_SPACE = "\t\n\r\f\v"
+
+
+# C1 제어영역(U+0080~U+009F). 정상 텍스트에는 절대 나오지 않으므로 모지바케 신호다.
+_C1 = re.compile(r"[\u0080-\u009f]")
+
+
+def fix_mojibake(text: str) -> str:
+    """UTF-8 바이트가 latin-1로 디코딩돼 온 것을 되돌린다.
+
+    **2026-09-16에 Finnhub 응답에서 발견했다.** `â\x80\x94`가 들어오는데,
+    이건 `E2 80 94`(U+2014 EM DASH)의 UTF-8 바이트가 latin-1로 읽힌 결과다.
+
+        'growth stay strongâ\x80\x94see why'  ->  'growth stay strong—see why'
+
+    제어문자만 지우면 `â`가 남아 단어가 깨진다. 되돌리는 것이 맞다.
+
+    **C1 제어문자가 있을 때만** 시도한다. 정상 텍스트에 U+0080~U+009F가 나올 일이
+    없으므로 오탐이 없는 신호다. 한국어가 섞여 있으면 latin-1 인코딩이 실패하는데,
+    그건 그대로 두면 된다 — 이 증상은 영문 소스에서만 나온다.
+    """
+    if not _C1.search(text):
+        return text
+    try:
+        repaired = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    # 복구 결과에 C1이 남아 있으면 가정이 틀린 것이다. 원문을 지킨다.
+    return text if _C1.search(repaired) else repaired
+
+
+def strip_invisible(text: str) -> str:
+    """보이지 않는 서식·제어 문자를 지운다.
+
+    **2026-09-16에 실제로 발견한 문제다.** 네이버 기사에 소프트 하이픈(U+00AD)이
+    섞여 들어온다 (`'박민정 기\xad자'`). 화면에는 안 보이는데 두 가지로 샌다.
+
+    1. 토큰 낭비 — 의미 없는 문자가 프롬프트에 실린다
+    2. **관련성 판정이 조용히 실패한다.** 한국어는 부분 문자열 매칭이라
+       `삼성전자` 사이에 이게 끼면 매칭이 안 되고, 그 기사는 `title` 등급을
+       못 받아 에이전트에 넘어가지 않는다. 기사를 잃는 것과 같다.
+
+    유니코드 카테고리로 거른다 — 목록을 하드코딩하면 새 문자가 나올 때마다 샌다.
+    `Cf`(서식)는 전부, `Cc`(제어)는 공백류만 남기고 지운다. 공백류는 뒤에서
+    `_WS`가 하나로 접는다.
+    """
+    return "".join(
+        ch for ch in text
+        if not (unicodedata.category(ch) == "Cf"
+                or (unicodedata.category(ch) == "Cc" and ch not in _KEEP_AS_SPACE))
+    )
+
+
 def clean_text(value: str | None) -> str:
-    """네이버는 <b> 태그와 HTML 엔티티를 섞어 보낸다. 그대로 프롬프트에 넣지 않는다."""
+    """벤더 원문을 씻는다. **이미 씻은 텍스트에 다시 돌리면 안 된다 - 멱등이 아니다.**
+
+    태그를 먼저 지우고 엔티티를 나중에 푸는 순서 때문에 HTML 엔티티로 인코딩된
+    꺾쇠는 리터럴 `<...>`로 남는다. 저장된 그 값에 이 함수를 또 돌리면 이번에는
+    진짜 태그로 보여 지워진다. 요약이 통째로 사라지는 경우가 실제로 있었다.
+
+    저장된 기사에 **새 정규화 규칙만** 다시 입히려면 `renormalize()`를 쓴다.
+    """
     if not value:
         return ""
     # 블록 태그는 단어 경계이므로 공백으로, 인라인 태그(<b> 등)는 지운다.
@@ -156,7 +218,26 @@ def clean_text(value: str | None) -> str:
     # 태그를 먼저 걷어낸 뒤에 엔티티를 푼다. 순서를 바꾸면 &lt;b&gt; 같은
     # 리터럴 텍스트가 진짜 태그가 되어 지워진다.
     text = html.unescape(text)
+    # 모지바케를 먼저 되돌린다. 순서가 반대면 `â\x80\x94`에서 제어문자만 지워져
+    # `â`가 남고, 그때는 되돌릴 근거(C1 신호)조차 사라진다.
+    text = fix_mojibake(text)
+    # **엔티티를 푼 뒤**에 지운다. `&shy;`가 바로 U+00AD로 풀리기 때문이다.
+    text = strip_invisible(text)
     return _WS.sub(" ", text).strip()
+
+
+def renormalize(value: str | None) -> str:
+    """이미 `clean_text`를 거쳐 저장된 텍스트에 **나중에 생긴 규칙만** 다시 입힌다.
+
+    태그 제거와 엔티티 해제는 다시 하지 않는다 - 수집 시점에 이미 끝났고,
+    다시 하면 리터럴 꺾쇠가 태그로 오인돼 본문이 사라진다(`clean_text` 설명 참고).
+
+    `scripts/clean_news_text.py`가 쓴다. 과거 구간은 다시 받을 수 없으므로
+    이미 받은 것을 새 규칙으로 다시 읽을 수 있어야 한다.
+    """
+    if not value:
+        return ""
+    return _WS.sub(" ", strip_invisible(fix_mojibake(value))).strip()
 
 
 def to_utc(value: datetime) -> datetime:

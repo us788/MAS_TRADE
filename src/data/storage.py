@@ -225,6 +225,20 @@ class Store:
                 updates)
             return cur.rowcount
 
+    def update_text(self, updates: list[tuple[str, str, str, str]]) -> int:
+        """저장된 제목·요약을 다시 정규화한 값으로 교체한다.
+
+        `(symbol, content_hash, title, summary)`. 정규화 규칙이 바뀌면 과거 기사도
+        새 규칙으로 읽을 수 있어야 한다 — 과거 구간은 다시 받을 수 없기 때문이다.
+        `content_hash`는 URL 기준이라 본문을 고쳐도 중복 제거 키가 흔들리지 않는다.
+        """
+        with self.connect() as conn:
+            conn.executemany(
+                "UPDATE news SET title = ?, summary = ? WHERE symbol = ? AND content_hash = ?",
+                [(t, s, sym, h) for sym, h, t, s in updates],
+            )
+            return conn.total_changes
+
     def relevance_matrix(self) -> list[dict]:
         """시장 × 등급 × 벤더태깅 교차표. 'none'이 전부 무관 기사라는 오해를 막는다."""
         with self.connect() as conn:

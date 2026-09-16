@@ -16,6 +16,8 @@ from src.data.news import (
     clean_text,
     filter_as_of,
     is_excluded,
+    fix_mojibake,
+    renormalize,
     term_matches,
 )
 from src.data.storage import Store
@@ -379,3 +381,97 @@ def test_교차표가_벤더태깅을_구분한다():
         assert matrix[("title", 0)] == 1
         assert matrix[("none", 1)] == 1
         assert store.primary_count()["KR"] == 2   # 둘 다 1차 자료
+
+
+# ---- 보이지 않는 문자 (2026-09-16 실제 데이터에서 발견) ----
+
+def test_소프트하이픈을_지운다():
+    """네이버 기사에 U+00AD가 섞여 들어온다. 화면에는 안 보인다."""
+    assert clean_text("박민정 기­자") == "박민정 기자"
+
+
+def test_shy_엔티티도_지운다():
+    """`&shy;`가 U+00AD로 풀린다. 엔티티를 푼 뒤에 걸러야 잡힌다."""
+    assert clean_text("삼성&shy;전자") == "삼성전자"
+
+
+def test_제로폭_문자와_bom을_지운다():
+    assert clean_text("삼​성‌전‍자") == "삼성전자"
+    assert clean_text("﻿삼성전자") == "삼성전자"
+    assert clean_text("‎삼성전자‏") == "삼성전자"
+
+
+def test_공백류_제어문자는_공백으로_남는다():
+    """줄바꿈·탭까지 지우면 단어가 붙어버린다."""
+    assert clean_text("삼성전자\n반도체") == "삼성전자 반도체"
+    assert clean_text("삼성전자\t반도체") == "삼성전자 반도체"
+    assert clean_text("삼성전자 반도체") == "삼성전자 반도체"
+
+
+def test_보이지_않는_문자가_관련성_판정을_깨뜨린다():
+    """**이게 진짜 피해다.** 한국어는 부분 문자열 매칭이라 종목명 사이에 끼면
+    매칭이 조용히 실패하고, 그 기사는 title 등급을 못 받아 에이전트에 안 넘어간다.
+    """
+    dirty = "삼성­전자 3분기 실적 발표"
+    assert not term_matches("삼성전자", dirty)      # 정규화 전 — 놓친다
+    assert term_matches("삼성전자", clean_text(dirty))   # 정규화 후 — 잡힌다
+
+
+# ---- 모지바케 (2026-09-16 Finnhub 응답에서 발견) ----
+
+def test_latin1로_깨진_utf8을_되돌린다():
+    """`â\x80\x94`는 E2 80 94(EM DASH)가 latin-1로 읽힌 것이다."""
+    assert clean_text("growth stay strong\u00e2\u0080\u0094see why") == "growth stay strong—see why"
+    assert clean_text("AI \u00e2\u0080\u009cpace\u00e2\u0080\u009d calls") == "AI “pace” calls"
+
+
+def test_제어문자만_지우면_깨진_글자가_남는다():
+    """되돌리지 않고 지우기만 하면 `â`가 남아 단어가 깨진다. 그래서 순서가 중요하다."""
+    broken = "strong\u00e2\u0080\u0094see"
+    assert "â" not in clean_text(broken)
+    assert "—" in clean_text(broken)
+
+
+def test_c1이_없으면_건드리지_않는다():
+    """오탐이 없어야 한다. 정상 텍스트를 망가뜨리면 더 나쁘다."""
+    for text in ("Normal — em dash", "삼성전자 3분기", "café naïve", "100% 상승"):
+        assert fix_mojibake(text) == text
+
+
+def test_한국어가_섞이면_복구를_시도하지_않는다():
+    """latin-1 인코딩이 안 되므로 원문을 지킨다. 이 증상은 영문 소스에서만 나온다."""
+    mixed = "삼성전자 \u0080 보고서"
+    assert fix_mojibake(mixed) == mixed        # 그대로
+    assert "\u0080" not in clean_text(mixed)   # 대신 strip_invisible이 지운다
+
+
+# ---- 재정규화 (clean_text는 멱등이 아니다) ----
+
+def test_clean_text를_두_번_돌리면_본문이_사라진다():
+    """실제로 밟았던 함정이다. 백필에서 clean_text를 재적용해 요약이 통째로 날아갔다.
+
+    태그를 먼저 지우고 엔티티를 나중에 푸는 순서 때문에 `&lt;...&gt;`가 리터럴
+    꺾쇠로 남는데, 두 번째 호출에서는 그게 진짜 태그로 보인다.
+    """
+    stored = clean_text("&lt;오늘의 부고&gt;")
+    assert stored == "<오늘의 부고>"
+    assert clean_text(stored) == ""          # 사라진다
+
+
+def test_renormalize는_저장된_꺾쇠를_지키면서_새_규칙만_입힌다():
+    stored = "<오늘의 부고>"
+    assert renormalize(stored) == stored
+
+    dirty = "\uc9c0" + chr(0x00ad) + "\ub9ac"          # 지<SHY>리
+    assert renormalize(dirty) == "\uc9c0\ub9ac"
+
+    moji = "strong" + "\u2014".encode("utf-8").decode("latin-1") + "see"
+    assert renormalize(moji) == "strong\u2014see"
+
+
+def test_renormalize는_멱등이다():
+    """백필을 두 번 돌려도 안전해야 한다."""
+    for text in ("<오늘의 부고>", "\uc0bc\uc131\uc804\uc790 3\ubd84\uae30",
+                 "strong" + "\u2014".encode("utf-8").decode("latin-1") + "see"):
+        once = renormalize(text)
+        assert renormalize(once) == once
