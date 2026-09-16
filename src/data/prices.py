@@ -314,6 +314,34 @@ class PriceStore:
             ).fetchone()
         return Bar.from_row(row) if row else None
 
+    def close_at_date(self, symbol: str, on: date) -> Bar | None:
+        """`on` 날짜 이하의 마지막 봉. 거래일이 이미 확정된 뒤의 조회에 쓴다.
+
+        `close_at`과 달리 장마감 판정을 하지 않는다 — 날짜가 이미 정해진 경우
+        (예: 기준봉의 날짜로 레짐을 계산할 때)에만 쓴다.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM prices WHERE symbol = ? AND date <= ?"
+                " ORDER BY date DESC LIMIT 1", (symbol, on.isoformat()),
+            ).fetchone()
+        return Bar.from_row(row) if row else None
+
+    def trailing_bar(self, symbol: str, base: date, trading_days: int) -> Bar | None:
+        """`base` **이전** N번째 거래일의 봉. `forward_bar`의 과거 방향 대칭.
+
+        미래를 보지 않으므로 as_of 안전하다. 레짐 판정(시그널 시점의 장세)에 쓴다.
+        """
+        if trading_days < 1:
+            raise ValueError("trading_days는 1 이상이어야 합니다.")
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM prices WHERE symbol = ? AND date < ?"
+                " ORDER BY date DESC LIMIT 1 OFFSET ?",
+                (symbol, base.isoformat(), trading_days - 1),
+            ).fetchone()
+        return Bar.from_row(row) if row else None
+
     def latest_date(self, symbol: str) -> date | None:
         """이 종목이 DB에 채워진 마지막 거래일. forward_bar의 None을 해석할 때 쓴다."""
         with self.connect() as conn:
