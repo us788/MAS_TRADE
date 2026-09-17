@@ -108,6 +108,11 @@ def compute_lookback_days(
     return min(hours / 24, MAX_LOOKBACK_DAYS)
 
 
+#: 커버리지 미달 gap의 사유 접두사. **이 종류는 재수집으로 메워지지 않는다** —
+#: 페이지 상한에 걸려 못 받은 구간은 영구 손실이므로 자동으로 닫지 않는다.
+COVERAGE_SHORTFALL = "커버리지 미달"
+
+
 def collect_one(store: Store, adapter, plan: Plan, as_of: datetime) -> tuple[NewsBatch | None, str]:
     """한 종목을 수집해 저장한다. 실패는 예외를 올리지 않고 사유를 돌려준다."""
     holding = plan.holding
@@ -136,10 +141,18 @@ def collect_one(store: Store, adapter, plan: Plan, as_of: datetime) -> tuple[New
         inserted=result.written, duplicates=result.skipped_duplicate,
     )
 
+    if batch.reached_floor:
+        # lookback 구간을 끝까지 덮었다면 그 안의 **수집 실패** gap은 이 수집이 메웠다.
+        # lookback은 "마지막 성공 수집 이후 × 1.5"라 실패가 이어졌으면 그만큼 늘어난다.
+        # 커버리지 미달 gap은 재수집으로 메워지지 않으므로 손대지 않는다.
+        floor = as_of - timedelta(days=plan.lookback_days)
+        store.resolve_gaps_covered(holding.symbol, plan.source, floor, as_of,
+                                   exclude_prefix=COVERAGE_SHORTFALL)
+
     if not batch.reached_floor:
         # 페이지 상한에 걸려 lookback 구간을 다 못 받았다. 그 앞은 영구 손실이므로
         # 기록해 두고 주기를 줄여야 한다.
-        reason = (f"커버리지 미달: {batch.pages}페이지로 {plan.lookback_days:.2f}일을 "
+        reason = (f"{COVERAGE_SHORTFALL}: {batch.pages}페이지로 {plan.lookback_days:.2f}일을 "
                   f"덮지 못함 (최古 {batch.oldest_seen})")
         store.record_gap(holding.market, plan.source, holding.symbol, reason, as_of)
         return batch, reason

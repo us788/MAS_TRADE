@@ -85,11 +85,28 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="주기를 무시하고 수집")
     parser.add_argument("--dry-run", action="store_true", help="대상만 출력, 호출 없음")
     parser.add_argument("--status", action="store_true", help="저장 현황과 gap 출력")
+    parser.add_argument("--resolve-gaps", action="store_true",
+                        help="재수집이 덮은 열린 gap을 닫는다 (무엇이 닫힐지만 보여준다)")
+    parser.add_argument("--apply", action="store_true", help="--resolve-gaps 실제 반영")
     args = parser.parse_args()
 
     store = Store()
     if args.status:
         return show_status(store)
+
+    if args.resolve_gaps:
+        from src.data.collector import COVERAGE_SHORTFALL
+        rows = store.backfill_gap_resolution(exclude_prefix=COVERAGE_SHORTFALL,
+                                             apply=args.apply)
+        remaining = len(store.open_gaps()) - (0 if args.apply else len(rows))
+        print(f"재수집이 덮은 gap {len(rows)}건" + (" — 닫았습니다" if args.apply else ""))
+        for r in rows[:10]:
+            print(f"  {r['at'][:16]} {r['symbol']} — {r['reason'][:60]}")
+        print(f"남는 열린 gap {remaining}건 "
+              f"(커버리지 미달은 영구 손실이라 닫지 않습니다)")
+        if rows and not args.apply:
+            print("\n--apply 를 붙이면 반영합니다.")
+        return 0
 
     now = datetime.now(timezone.utc)
     plans = build_plan(

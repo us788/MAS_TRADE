@@ -193,3 +193,48 @@ def test_페이지가_여러개여도_원본이_덮어써지지_않는다():
         files = list((Path(tmp) / "raw").rglob("*.json"))
         assert len(files) == 1
         assert json.loads(files[0].read_text(encoding="utf-8"))["page_count"] == 3
+
+
+# ---- gap 자동 해소 (2026-09-17) ----
+
+def test_재수집이_덮은_실패_gap은_닫힌다():
+    """실패가 정상 경로면 **닫히는 것도 정상 경로**여야 한다.
+    안 닫으면 '열린 gap N건'이 쌓이기만 해서 지표로 못 쓴다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.record_gap("KR", "naver", "005930", "VendorError: DNS 실패",
+                         NOW - timedelta(hours=2))
+        assert len(store.open_gaps()) == 1
+        n = store.resolve_gaps_covered("005930", "naver",
+                                       NOW - timedelta(hours=3), NOW)
+        assert n == 1 and store.open_gaps() == []
+
+
+def test_커버리지_미달_gap은_닫지_않는다():
+    """페이지 상한에 걸려 못 받은 구간은 **영구 손실**이다. 재수집으로 메워지지 않는다."""
+    from src.data.collector import COVERAGE_SHORTFALL
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.record_gap("KR", "naver", "005930", f"{COVERAGE_SHORTFALL}: 10페이지로 ...",
+                         NOW - timedelta(hours=2))
+        n = store.resolve_gaps_covered("005930", "naver", NOW - timedelta(hours=3), NOW,
+                                       exclude_prefix=COVERAGE_SHORTFALL)
+        assert n == 0 and len(store.open_gaps()) == 1
+
+
+def test_덮지_못한_구간_밖의_gap은_그대로_둔다():
+    """lookback이 닿지 않은 과거의 실패는 메워진 것이 아니다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.record_gap("KR", "naver", "005930", "VendorError", NOW - timedelta(days=5))
+        n = store.resolve_gaps_covered("005930", "naver", NOW - timedelta(days=1), NOW)
+        assert n == 0 and len(store.open_gaps()) == 1
+
+
+def test_다른_종목의_gap은_건드리지_않는다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.record_gap("KR", "naver", "000660", "VendorError", NOW - timedelta(hours=2))
+        n = store.resolve_gaps_covered("005930", "naver", NOW - timedelta(hours=3), NOW)
+        assert n == 0 and len(store.open_gaps()) == 1

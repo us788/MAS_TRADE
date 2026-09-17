@@ -2,8 +2,9 @@
 #
 # launchd 스케줄러 등록. 작업 두 개를 관리한다.
 #
-#   collect    매시 5분     뉴스 수집 (scripts/run_collect.sh)
+#   collect    매시 5분      뉴스 수집 (scripts/run_collect.sh)
 #   baseline   매주 수 07:00  베이스라인 시그널 (scripts/run_baseline.sh)
+#   health     매일 08:30    파이프라인 점검 (scripts/run_health.sh) — 이상 시 알림
 #
 # 저장소를 옮긴 뒤에는 이 스크립트를 다시 돌리기만 하면 된다. plist에 박힌 경로를
 # 지금 위치로 다시 써서 재등록한다.
@@ -22,16 +23,17 @@ set -uo pipefail
 
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DOMAIN="gui/$(id -u)"
-JOBS=(collect baseline)
+JOBS=(collect baseline health)
 
 # 작업별 정의 ------------------------------------------------------------
 label_of()   { echo "com.ys.mastrade.$1"; }
-script_of()  { case "$1" in collect) echo "run_collect.sh";; baseline) echo "run_baseline.sh";; esac; }
+script_of()  { case "$1" in collect) echo "run_collect.sh";; baseline) echo "run_baseline.sh";; health) echo "run_health.sh";; esac; }
 runatload_of() {
     # 베이스라인은 돈이 나간다. 로그인마다 부르지 않는다.
     # 잠든 사이 밀린 실행은 StartCalendarInterval이 깨어날 때 한 번 돌려 주므로
     # RunAtLoad 없이도 따라잡기는 된다.
-    case "$1" in collect) echo "true";; baseline) echo "false";; esac
+    # health는 깨어날 때 한 번 더 확인해 주는 편이 낫다 — 비용이 0이다.
+    case "$1" in collect) echo "true";; baseline) echo "false";; health) echo "true";; esac
 }
 schedule_of() {
     case "$1" in
@@ -39,12 +41,15 @@ schedule_of() {
         baseline) printf '        <key>Weekday</key>\n        <integer>3</integer>\n'
                   printf '        <key>Hour</key>\n        <integer>7</integer>\n'
                   printf '        <key>Minute</key>\n        <integer>0</integer>\n' ;;
+        health)   printf '        <key>Hour</key>\n        <integer>8</integer>\n'
+                  printf '        <key>Minute</key>\n        <integer>30</integer>\n' ;;
     esac
 }
 describe_of() {
     case "$1" in
         collect)  echo "매시 5분 (+ 로그인 시)" ;;
         baseline) echo "매주 수요일 07:00 KST" ;;
+        health)   echo "매일 08:30 KST (장 시작 전) + 로그인 시" ;;
     esac
 }
 

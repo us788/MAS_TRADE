@@ -99,7 +99,22 @@ trap 'rm -rf "$LOCK"' EXIT
 
 cd "$REPO" || { log "FAIL  cd 실패: $REPO"; exit 1; }
 
-"$PYTHON" scripts/collect_news.py >> "$LOG" 2>&1
+# **caffeinate로 감싸는 이유** (2026-09-17 진단).
+# launchd는 잠든 맥을 DarkWake로 깨워 작업을 발화시키지만, **DarkWake는 1분도 안 돼
+# 다시 잠든다.** 그 사이 Wi-Fi가 끊겨 DNS가 죽고 벤더 호출이 전부 실패한다.
+#
+#   18:04:56  DarkWake (wifi)
+#   18:05:00  수집 시작
+#   18:05:41  Entering Sleep (Maintenance Sleep)   <- 41초 만에
+#   18:11:28  수집 실패 (8종목 중 7종목 NameResolutionError)
+#
+# `caffeinate -im <명령>`은 그 명령이 **끝날 때까지만** 어서션을 잡는다.
+#   -i  유휴 잠자기 방지    -m  디스크 잠자기 방지(SQLite 쓰기 중)
+# 평소 전력에는 영향이 없다. 배터리에서는 시스템 잠자기(-s)를 막을 수 없으므로
+# 뚜껑을 닫으면 여전히 취약하다 — 그건 상시 전원 기기로 옮겨야 풀린다.
+
+
+/usr/bin/caffeinate -im "$PYTHON" scripts/collect_news.py >> "$LOG" 2>&1
 STATUS=$?
 
 if [ -n "${SNAPSHOT_RETENTION_DAYS:-}" ]; then

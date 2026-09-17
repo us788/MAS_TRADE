@@ -301,6 +301,58 @@ class Store:
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM collection_gaps WHERE resolved = 0 ORDER BY at DESC")]
 
+    def resolve_gaps_covered(self, symbol: str, source: str, floor: datetime,
+                             as_of: datetime, *, exclude_prefix: str = "") -> int:
+        """재수집이 덮은 **수집 실패** gap을 닫는다.
+
+        열린 gap이 복구돼도 닫히지 않으면 `--status`의 "열린 gap N건"이 쌓이기만 해서
+        지표로 못 쓴다. 실패가 정상 경로인 설계이므로 **닫히는 것도 정상 경로**여야 한다.
+
+        `exclude_prefix`에 해당하는 사유는 건드리지 않는다 — 커버리지 미달은 페이지
+        상한에 걸려 못 받은 구간이라 재수집으로 메워지지 않는다. 영구 손실 표시다.
+        """
+        sql = ["UPDATE collection_gaps SET resolved = 1",
+               "WHERE resolved = 0 AND symbol = ? AND source = ?",
+               "AND at >= ? AND at <= ?"]
+        params: list = [symbol, source, _utc(floor).isoformat(), _utc(as_of).isoformat()]
+        if exclude_prefix:
+            sql.append("AND reason NOT LIKE ?")
+            params.append(f"{exclude_prefix}%")
+        with self.connect() as conn:
+            cur = conn.execute(" ".join(sql), params)
+            return cur.rowcount
+
+    def backfill_gap_resolution(self, *, exclude_prefix: str = "",
+                                apply: bool = False) -> list[dict]:
+        """이미 쌓인 열린 gap 중 **재수집이 실제로 덮은 것**을 찾아 닫는다.
+
+        판정 근거는 추측이 아니라 `collection_runs.oldest_seen`이다 — 그 종목의
+        이후 수집이 gap 시각보다 더 과거까지 닿았고(`oldest_seen <= gap.at`)
+        lookback 구간을 끝까지 덮었다면(`reached_floor = 1`) 그 구멍은 메워진 것이다.
+
+        `apply=False`면 무엇이 닫힐지만 돌려준다 (파괴적 동작은 명시적으로만).
+        """
+        sql = """
+            SELECT g.id, g.symbol, g.source, g.at, g.reason
+            FROM collection_gaps g
+            WHERE g.resolved = 0
+              AND EXISTS (
+                SELECT 1 FROM collection_runs r
+                WHERE r.symbol = g.symbol AND r.source = g.source
+                  AND r.ran_at > g.at AND r.reached_floor = 1
+                  AND r.oldest_seen IS NOT NULL AND r.oldest_seen <= g.at)
+        """
+        params: list = []
+        if exclude_prefix:
+            sql += " AND g.reason NOT LIKE ?"
+            params.append(f"{exclude_prefix}%")
+        with self.connect() as conn:
+            rows = [dict(r) for r in conn.execute(sql, params)]
+            if apply and rows:
+                conn.executemany("UPDATE collection_gaps SET resolved = 1 WHERE id = ?",
+                                 [(r["id"],) for r in rows])
+        return rows
+
     def resolve_gap(self, gap_id: int) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE collection_gaps SET resolved = 1 WHERE id = ?", (gap_id,))
