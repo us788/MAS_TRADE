@@ -42,7 +42,7 @@
 | 수집 실행 | 130회, 열린 gap 0건 |
 | 최초 관측 | 2026-09-15 09:24 UTC — **그 이전 뉴스는 영원히 없다** |
 | 보유 최古 기사 | 발행 기준 2026-09-13 09:41 UTC (첫 수집의 lookback이 닿은 지점) |
-| 테스트 | 168건 통과 |
+| 테스트 | 178건 통과 |
 | SEC EDGAR | 403으로 보류 |
 
 > 이전 핸드오프는 기록 시작을 `03:26 UTC`로 적었는데 DB와 맞지 않는다.
@@ -58,7 +58,8 @@ python scripts/collect_prices.py --status   # 가격 현황, 종목별 커버리
 python scripts/score_benchmarks.py          # 벤치마크 + 저울 검정 (랜덤이 0.5인가)
 python scripts/run_baseline.py --status     # 시그널·토큰·비용 누적
 python scripts/score_signals.py             # 시그널 채점 (pending이면 아직 안 지난 것)
-python scripts/score_strategies.py          # 룰 기반 비교군 백테스트
+python scripts/score_strategies.py          # 룰 기반 비교군 백테스트 (층 1)
+python scripts/run_portfolio.py             # 가상 포트폴리오 (층 2)
 python scripts/collect_news.py --dry-run    # 지금 돌면 어떤 종목이 대상인지
 python -m pytest tests/ -q                  # 67건
 
@@ -235,7 +236,9 @@ git과 무관하고, 경로가 박혀 있으므로 **이사하면 반드시 재�
 6. ~~감시자 자동화~~ — **기계적 판정은 붙였다** (2026-09-17). `scripts/health_check.py`가
    매일 08:30 KST에 돌며 이상 시 macOS 알림을 띄운다. 남은 것은 **해석**이다 —
    "왜 그런가"와 "무엇부터 고치나"는 아직 사람(또는 로컬 Claude 세션)의 몫
-7. **층 2 가상 포트폴리오** — 기획서 9.2절. 층 1이 주 평가라 급하지 않다
+7. ~~층 2 가상 포트폴리오~~ — **구현했다** (2026-09-18). 룰 전략 3년치로 검증 완료.
+   LLM 시그널은 1회차뿐이라 아직 못 돌린다 — 몇 주 쌓이면 같은 스크립트로 비교된다.
+   결과와 한계는 `docs/baselines.md` 7절
 8. **분석 에이전트 · 논쟁 · 리스크 엔진** — 기획서 8절. 베이스라인 표본이 쌓인 뒤.
    호출 구조는 `docs/architecture.md` 3.3절에 정리돼 있다 (후보당 약 11회)
 9. **남은 비교군** — 오픈소스 프레임워크(TradingAgents 등) 동일 조건 실행,

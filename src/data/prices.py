@@ -327,6 +327,20 @@ class PriceStore:
             ).fetchone()
         return Bar.from_row(row) if row else None
 
+    def bar_on_or_after(self, symbol: str, on: date) -> Bar | None:
+        """`on` 날짜 **이상**의 첫 봉. 체결가를 집을 때 쓴다.
+
+        `close_at_date`(이하의 마지막 봉)와 방향이 반대다. 판단은 과거를 보지만
+        **체결은 미래에 일어난다** — 수요일 아침에 낸 시그널은 그날 종가로 체결된다.
+        휴장이면 다음 거래일이다.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM prices WHERE symbol = ? AND date >= ?"
+                " ORDER BY date ASC LIMIT 1", (symbol, on.isoformat()),
+            ).fetchone()
+        return Bar.from_row(row) if row else None
+
     def trailing_bar(self, symbol: str, base: date, trading_days: int) -> Bar | None:
         """`base` **이전** N번째 거래일의 봉. `forward_bar`의 과거 방향 대칭.
 
