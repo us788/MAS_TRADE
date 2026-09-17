@@ -155,10 +155,16 @@ def known_trading_date(market: str, as_of: datetime) -> date:
     return local.date() - timedelta(days=1)
 
 
+#: 가격 비교 허용오차. 벤더는 호출마다 미세하게 다른 부동소수점을 준다.
+#: 1e-9로 뒀더니 **수정 이력 4,759건 중 4,744건이 잡음**이었다 (2026-09-18 실측).
+#: 소수점 넷째 자리까지 유효한 가격을 가정하면 1e-6이 충분하다.
+PRICE_REL_TOL = 1e-6
+
+
 def _same(a: float | None, b: float | None) -> bool:
     if a is None or b is None:
         return a is b
-    return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-6)
+    return math.isclose(a, b, rel_tol=PRICE_REL_TOL, abs_tol=1e-6)
 
 
 class PriceStore:
@@ -199,7 +205,7 @@ class PriceStore:
 
     # ---- 쓰기 ----
 
-    def upsert(self, bars: Iterable[Bar]) -> UpsertResult:
+    def upsert(self, bars: Iterable[Bar], *, force: bool = False) -> UpsertResult:
         """가격은 뉴스와 달리 **덮는다.** 수정주가가 사후에 바뀌는 것이 정상이기 때문이다.
 
         - `close_tr`만 달라지면 배당 반영이다 → 덮고 `price_revisions`에 남긴다
@@ -233,7 +239,22 @@ class PriceStore:
                 px_changed = not _same(old["close_px"], bar.close_px)
                 tr_changed = not _same(old["close_tr"], bar.close_tr)
 
-                if px_changed:
+                if px_changed and force:
+                    # 사람이 명시적으로 재적재를 요청했다. 보류 규칙을 넘긴다.
+                    conn.execute(
+                        "UPDATE prices SET open_px=?, high_px=?, low_px=?, close_px=?,"
+                        " close_tr=?, volume=?, source=?, fetched_at=?"
+                        " WHERE symbol=? AND date=?",
+                        (bar.open_px, bar.high_px, bar.low_px, bar.close_px,
+                         bar.close_tr, bar.volume, bar.source, now, *key),
+                    )
+                    conn.execute(
+                        "INSERT INTO price_revisions (symbol, date, field, old_value,"
+                        " new_value, applied, noticed_at) VALUES (?,?,?,?,?,1,?)",
+                        (*key, "close_px", old["close_px"], bar.close_px, now),
+                    )
+                    result.revised += 1
+                elif px_changed:
                     # 분할이 새로 반영됐거나 벤더가 값을 고쳤다. 코드가 구분할 수 없다.
                     # 이 응답 전체를 보류한다 — 한 열만 골라 받으면 행이 어긋난다.
                     conn.execute(

@@ -84,6 +84,9 @@ def main() -> int:
     ap.add_argument("--market", choices=("KR", "US"), action="append")
     ap.add_argument("--symbol", action="append")
     ap.add_argument("--years", type=int, default=DEFAULT_YEARS)
+    ap.add_argument("--refetch", action="store_true",
+                    help="close_px 보류 규칙을 넘겨 벤더 값으로 덮는다. "
+                         "미완결 봉이 저장돼 정정이 거부된 경우에 쓴다")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--status", action="store_true")
     args = ap.parse_args()
@@ -121,7 +124,7 @@ def main() -> int:
             failed += 1
             continue
 
-        r = store.upsert(bars)
+        r = store.upsert(bars, force=args.refetch)
         note = ""
         if r.revised:
             note += f" 수정 {r.revised}"

@@ -8,7 +8,7 @@
 설계 근거는 `docs/harness.md`.
 """
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -209,3 +209,71 @@ def test_gap은_예외가_아니라_기록이다():
         assert len(gaps) == 1 and gaps[0]["reason"] == "벤더 빈 응답"
         s.resolve_gap(gaps[0]["id"])
         assert s.open_gaps() == []
+
+
+# ---- 미완결 세션 차단 (2026-09-18 실제 장애) ----
+
+def test_아직_안_끝난_세션의_봉은_버린다():
+    """장중 스냅샷이 종가로 저장되면 틀린 값이 영구히 남는다.
+
+    실제로 당했다 — 한국 장 마감 14분 전에 수집해 삼성전자 09-16 종가가
+    253,250(장중)으로 저장됐고, 진짜 종가 253,500은 `close_px` 변경으로 판정돼
+    "벤더 오류 의심"으로 거부됐다.
+    """
+    from src.data.price_sources import drop_unclosed
+    today = date.today()
+    bars = [_bar("X", today - timedelta(days=10), 100, market="US"),
+            _bar("X", today + timedelta(days=1), 200, market="US")]
+    kept = drop_unclosed(bars, "US")
+    assert [b.date for b in kept] == [today - timedelta(days=10)]
+
+
+def test_조회와_저장이_같은_규칙을_쓴다():
+    """`known_trading_date`를 조회에만 쓰고 저장에 안 쓰면 그 틈으로 샌다."""
+    from src.data.price_sources import drop_unclosed
+    from src.data.prices import known_trading_date
+    now = datetime.now(timezone.utc)
+    for market in ("KR", "US"):
+        cut = known_trading_date(market, now)
+        bars = [_bar("X", cut, 100), _bar("X", cut + timedelta(days=1), 200)]
+        assert [b.date for b in drop_unclosed(bars, market)] == [cut]
+
+
+# ---- 비교 허용오차 ----
+
+def test_부동소수점_잡음은_수정으로_기록하지_않는다():
+    """1e-9로 뒀더니 수정 이력 4,759건 중 4,744건이 잡음이었다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.upsert([_bar("005930", date(2026, 9, 14), 100.0)])
+        r = s.upsert([_bar("005930", date(2026, 9, 14), 100.0 + 1e-8)])
+        assert r.unchanged == 1 and r.revised == 0 and r.conflicted == 0
+
+
+def test_의미_있는_변화는_여전히_잡는다():
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.upsert([_bar("005930", date(2026, 9, 14), 100.0)])
+        r = s.upsert([_bar("005930", date(2026, 9, 14), 100.01)])
+        assert r.conflicted == 1
+
+
+# ---- 강제 재적재 ----
+
+def test_force면_보류_규칙을_넘어_덮는다():
+    """미완결 봉이 저장돼 정정이 거부된 경우를 사람이 풀어줄 경로."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.upsert([_bar("005930", date(2026, 9, 16), 253250)])     # 장중 스냅샷
+        r = s.upsert([_bar("005930", date(2026, 9, 16), 253500)], force=True)
+        assert r.revised == 1 and r.conflicted == 0
+        got = s.close_at("005930", "KR", datetime(2026, 9, 16, 16, 0, tzinfo=KST))
+        assert got.close_px == 253500
+
+
+def test_force가_없으면_그대로_보류한다():
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.upsert([_bar("005930", date(2026, 9, 16), 253250)])
+        r = s.upsert([_bar("005930", date(2026, 9, 16), 253500)])
+        assert r.conflicted == 1 and r.revised == 0

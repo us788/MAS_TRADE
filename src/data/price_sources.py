@@ -26,15 +26,31 @@
 from __future__ import annotations
 
 import warnings
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
-from src.data.prices import Bar
+from src.data.prices import Bar, known_trading_date
 
 # 벤치마크 지수. 적중 판정이 지수 대비 초과라 채점에 반드시 필요하다 (harness.md 4.1).
 BENCHMARKS: dict[str, tuple[str, str]] = {
     "US": ("^GSPC", "S&P500"),
     "KR": ("KS200", "KOSPI200"),
 }
+
+
+def drop_unclosed(bars: list[Bar], market: str) -> list[Bar]:
+    """**아직 안 끝난 세션의 봉을 버린다.**
+
+    2026-09-18에 실제로 당한 문제다. 한국 장 마감 14분 전(15:16 KST)에 수집했더니
+    **장중 스냅샷이 종가로 저장됐고**, 나중에 온 진짜 종가는 `close_px` 변경으로
+    판정돼 "벤더 오류 의심"으로 거부됐다. 틀린 값이 영구히 남는다.
+
+        삼성전자 2026-09-16   저장된 값 253,250 (장중)   실제 종가 253,500
+
+    `known_trading_date`가 이미 "그 시점에 종가를 알 수 있는 상한"을 계산한다.
+    조회에 쓰던 규칙을 **저장에도 똑같이** 적용한다 — 장마감 +30분 이후에만 받아들인다.
+    """
+    cutoff = known_trading_date(market, datetime.now(timezone.utc))
+    return [b for b in bars if b.date <= cutoff]
 
 
 class PriceFetchError(RuntimeError):
@@ -88,8 +104,10 @@ def fetch_us(symbol: str, start: date, end: date, market: str = "US") -> list[Ba
             low_px=_f(row.get("Low")), close_px=close_px, close_tr=close_tr,
             volume=int(vol) if vol is not None else None, source="yfinance",
         ))
+    bars = drop_unclosed(bars, market if market != "INDEX" else "US")
     if not bars:
-        raise PriceFetchError(f"{symbol}: 유효한 봉이 없습니다.")
+        raise PriceFetchError(f"{symbol}: 유효한 봉이 없습니다 "
+                              f"(완결된 세션이 없을 수 있습니다).")
     return bars
 
 
@@ -121,8 +139,10 @@ def fetch_kr(symbol: str, start: date, end: date, market: str = "KR") -> list[Ba
             close_px=close, close_tr=close,   # FDR은 수정주가 하나만 준다
             volume=int(vol) if vol is not None else None, source="fdr",
         ))
+    bars = drop_unclosed(bars, market if market != "INDEX" else "KR")
     if not bars:
-        raise PriceFetchError(f"{symbol}: 유효한 봉이 없습니다.")
+        raise PriceFetchError(f"{symbol}: 유효한 봉이 없습니다 "
+                              f"(완결된 세션이 없을 수 있습니다).")
     return bars
 
 
