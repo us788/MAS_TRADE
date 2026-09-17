@@ -191,10 +191,28 @@ N=2라면 **후보 1종목당 약 11회**가 된다 (현재 1회). 비용은 단
 
 ### 5.1 스케줄 (launchd, 시스템 현지 시간 = KST)
 
-| 작업 | 주기 | RunAtLoad | 래퍼 |
-|---|---|---|---|
-| `com.ys.mastrade.collect` | 매시 5분 | true | `scripts/run_collect.sh` |
-| `com.ys.mastrade.baseline` | 매주 수 07:00 | **false** | `scripts/run_baseline.sh` |
+| 작업 | 시계 | 네트워크 연결 시 | RunAtLoad | 래퍼 |
+|---|---|---|---|---|
+| `com.ys.mastrade.collect` | 매시 5분 | — | true | `scripts/run_collect.sh` |
+| `com.ys.mastrade.baseline` | 매주 수 07:00 | ✅ | **false** | `scripts/run_baseline.sh` |
+| `com.ys.mastrade.health` | 매일 08:30 | ✅ | true | `scripts/run_health.sh` |
+
+**노트북은 정해진 시각에 켜져 있지 않다.** 시계만 믿으면 그날 몫을 통째로 거르므로,
+`LaunchEvents`의 `com.apple.system.config.network_change`로 **뚜껑을 열어 Wi-Fi가
+붙는 순간**에도 발화시킨다. 수집(매시)에는 붙이지 않는다 — 네트워크는 하루에도 수십 번
+바뀌고, 매시 주기가 이미 그 역할을 한다.
+
+이 트리거는 **Wi-Fi가 끊길 때도 발화한다.** 그래서 두 겹의 방어가 필요하다.
+
+1. **DNS 대기** — 래퍼가 벤더 호스트를 최대 30초까지 확인하고, 안 되면 조용히
+   건너뛴다. 건너뛰면 수집 기록이 안 남으므로 다음 회차 lookback이 늘어 메운다
+2. **하루(주) 1회 가드** — 점검은 스탬프 파일, 베이스라인은
+   `has_successful_run()`으로 같은 시점 중복을 막는다
+
+**실행 중 잠자기 차단**: 모든 래퍼가 `caffeinate -im`으로 감싼다. launchd는 DarkWake로
+맥을 깨워 작업을 발화시키지만 **DarkWake는 1분도 안 돼 다시 잠들어** 실행 도중
+네트워크가 끊긴다(2026-09-17 실측). 배터리에서는 시스템 잠자기를 막을 수 없어
+뚜껑을 닫으면 여전히 취약하다.
 
 cron이 아니라 launchd인 이유는 **노트북은 잠들고 cron은 따라잡지 않기 때문**이다.
 `StartCalendarInterval`은 깨어날 때 밀린 실행을 한 번 돌린다.

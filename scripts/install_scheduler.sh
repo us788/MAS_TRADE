@@ -45,11 +45,20 @@ schedule_of() {
                   printf '        <key>Minute</key>\n        <integer>30</integer>\n' ;;
     esac
 }
+# 네트워크 연결이 바뀔 때도 발화시킬 것인가.
+# **노트북은 정해진 시각에 켜져 있지 않다.** 시계만 믿으면 그날 몫을 통째로 거른다.
+# 뚜껑을 열어 Wi-Fi가 붙는 순간을 주 트리거로 쓰고 시계는 보조로 남긴다.
+# 수집(collect)은 매시 도는 것이 설계이므로 붙이지 않는다 — 네트워크는 하루에도
+# 수십 번 바뀌고, 매시 주기가 이미 그 역할을 한다.
+network_trigger_of() {
+    case "$1" in collect) echo "false";; baseline) echo "true";; health) echo "true";; esac
+}
+
 describe_of() {
     case "$1" in
         collect)  echo "매시 5분 (+ 로그인 시)" ;;
-        baseline) echo "매주 수요일 07:00 KST" ;;
-        health)   echo "매일 08:30 KST (장 시작 전) + 로그인 시" ;;
+        baseline) echo "매주 수요일 07:00 KST + 네트워크 연결 시 (주 1회만 실제 실행)" ;;
+        health)   echo "매일 08:30 KST + 네트워크 연결 시 (하루 1회만 실제 점검)" ;;
     esac
 }
 
@@ -134,6 +143,25 @@ PLIST_HEAD
 
     <key>RunAtLoad</key>
     <$(runatload_of "$job")/>
+$(if [ "$(network_trigger_of "$job")" = "true" ]; then cat <<'EVT'
+
+    <!-- 네트워크 연결이 바뀔 때도 발화한다 (뚜껑을 열어 Wi-Fi가 붙는 순간).
+         노트북은 정해진 시각에 켜져 있지 않으므로 시계만으로는 그날 몫을 거른다.
+         Wi-Fi가 **끊길 때도** 발화하므로 래퍼가 DNS 준비를 확인하고,
+         하루(주) 1회 가드가 중복 실행을 막는다. -->
+    <key>LaunchEvents</key>
+    <dict>
+        <key>com.apple.notifyd.matching</key>
+        <dict>
+            <key>network-change</key>
+            <dict>
+                <key>Notification</key>
+                <string>com.apple.system.config.network_change</string>
+            </dict>
+        </dict>
+    </dict>
+EVT
+fi)
 
     <!-- 래퍼가 자체 로그를 쓴다. 여기 찍히는 건 래퍼가 시작조차 못 했을 때다. -->
     <key>StandardOutPath</key>

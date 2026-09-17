@@ -66,6 +66,24 @@ free_gb() {
     df -g "$REPO" 2>/dev/null | tail -1 | awk '{print $4}'
 }
 
+
+# **DNS가 준비될 때까지 기다린다** (2026-09-17 장애 대응).
+# 이번 수집 실패의 실제 원인은 벤더가 아니라 DarkWake 직후 DNS가 아직 안 붙은 것이었다
+# (NameResolutionError). 네트워크 변경 트리거는 Wi-Fi가 **끊길 때도** 발화하므로
+# 그냥 실행하면 실패만 기록된다.
+#
+# 최대 30초까지 기다렸다가 그래도 안 되면 조용히 건너뛴다. 건너뛰면 이번 회차
+# 수집 기록이 남지 않으므로 **다음 회차의 lookback이 자동으로 늘어 구멍을 메운다** —
+# 실패로 기록하는 것보다 깨끗하다.
+wait_for_dns() {
+    local host="$1" i
+    for i in 1 2 3 4 5 6; do
+        /usr/bin/nslookup -timeout=3 "$host" >/dev/null 2>&1 && return 0
+        sleep 5
+    done
+    return 1
+}
+
 rotate_log
 log "───── 수집 시작 (pid $$)  repo=$REPO"
 
@@ -96,6 +114,12 @@ if ! acquire_lock; then
     exit 0
 fi
 trap 'rm -rf "$LOCK"' EXIT
+
+if ! wait_for_dns "naverapihub.apigw.ntruss.com"; then
+    log "SKIP  DNS가 준비되지 않았다 (naverapihub.apigw.ntruss.com) — 이번 회차를 건너뛴다"
+    log "      다음 회차의 lookback이 늘어 구멍을 메운다"
+    exit 0
+fi
 
 cd "$REPO" || { log "FAIL  cd 실패: $REPO"; exit 1; }
 
