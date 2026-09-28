@@ -1,10 +1,14 @@
 #!/bin/bash
 #
-# launchd 스케줄러 등록. 작업 두 개를 관리한다.
+# launchd 스케줄러 등록. 작업 네 개를 관리한다.
 #
 #   collect    매시 5분      뉴스 수집 (scripts/run_collect.sh)
+#   prices     매일 17:00    가격 수집 (scripts/run_prices.sh) — 한국장 마감 후
 #   baseline   매주 수 07:00  베이스라인 시그널 (scripts/run_baseline.sh)
 #   health     매일 08:30    파이프라인 점검 (scripts/run_health.sh) — 이상 시 알림
+#
+# prices가 늦게 합류한 이유는 docs/journal/2026-09-28.md — 11일간 가격이 한 봉도
+# 안 들어왔는데 아무도 그걸 부르지 않아서였다.
 #
 # 저장소를 옮긴 뒤에는 이 스크립트를 다시 돌리기만 하면 된다. plist에 박힌 경로를
 # 지금 위치로 다시 써서 재등록한다.
@@ -23,21 +27,24 @@ set -uo pipefail
 
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DOMAIN="gui/$(id -u)"
-JOBS=(collect baseline health)
+JOBS=(collect prices baseline health)
 
 # 작업별 정의 ------------------------------------------------------------
 label_of()   { echo "com.ys.mastrade.$1"; }
-script_of()  { case "$1" in collect) echo "run_collect.sh";; baseline) echo "run_baseline.sh";; health) echo "run_health.sh";; esac; }
+script_of()  { case "$1" in collect) echo "run_collect.sh";; prices) echo "run_prices.sh";; baseline) echo "run_baseline.sh";; health) echo "run_health.sh";; esac; }
 runatload_of() {
     # 베이스라인은 돈이 나간다. 로그인마다 부르지 않는다.
     # 잠든 사이 밀린 실행은 StartCalendarInterval이 깨어날 때 한 번 돌려 주므로
     # RunAtLoad 없이도 따라잡기는 된다.
     # health는 깨어날 때 한 번 더 확인해 주는 편이 낫다 — 비용이 0이다.
-    case "$1" in collect) echo "true";; baseline) echo "false";; health) echo "true";; esac
+    # prices는 비용이 0이고 채점이 여기 매달려 있다 — 깨어날 때 한 번 더 본다.
+    case "$1" in collect) echo "true";; prices) echo "true";; baseline) echo "false";; health) echo "true";; esac
 }
 schedule_of() {
     case "$1" in
         collect)  printf '        <key>Minute</key>\n        <integer>5</integer>\n' ;;
+        prices)   printf '        <key>Hour</key>\n        <integer>17</integer>\n'
+                  printf '        <key>Minute</key>\n        <integer>0</integer>\n' ;;
         baseline) printf '        <key>Weekday</key>\n        <integer>3</integer>\n'
                   printf '        <key>Hour</key>\n        <integer>7</integer>\n'
                   printf '        <key>Minute</key>\n        <integer>0</integer>\n' ;;
@@ -51,12 +58,13 @@ schedule_of() {
 # 수집(collect)은 매시 도는 것이 설계이므로 붙이지 않는다 — 네트워크는 하루에도
 # 수십 번 바뀌고, 매시 주기가 이미 그 역할을 한다.
 network_trigger_of() {
-    case "$1" in collect) echo "false";; baseline) echo "true";; health) echo "true";; esac
+    case "$1" in collect) echo "false";; prices) echo "true";; baseline) echo "true";; health) echo "true";; esac
 }
 
 describe_of() {
     case "$1" in
         collect)  echo "매시 5분 (+ 로그인 시)" ;;
+        prices)   echo "매일 17:00 KST + 네트워크 연결 시 (하루 1회만 실제 수집)" ;;
         baseline) echo "매주 수요일 07:00 KST + 네트워크 연결 시 (주 1회만 실제 실행)" ;;
         health)   echo "매일 08:30 KST + 네트워크 연결 시 (하루 1회만 실제 점검)" ;;
     esac
@@ -216,7 +224,7 @@ for job in "${JOBS[@]}"; do install_job "$job" || fail=1; done
 
 echo
 echo "저장소   $REPO"
-echo "로그     $REPO/logs/collect.log · $REPO/logs/baseline.log"
+echo "로그     $REPO/logs/collect.log · $REPO/logs/prices.log · $REPO/logs/baseline.log"
 echo
 echo "검증"
 echo "  scripts/install_scheduler.sh --status"

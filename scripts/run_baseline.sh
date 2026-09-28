@@ -25,6 +25,8 @@ LOG_KEEP=3
 DISK_ABORT_GB=1
 # LLM 호출이 30건 × 최대 수십 초라 한 판이 30분을 넘을 수 있다. 수집보다 길게 잡는다.
 LOCK_STALE_SECONDS=7200
+# 기준가가 이보다 묵으면 시그널을 내지 않는다. 주말(2일)에 연휴가 붙는 경우를 감안한 값.
+PRICE_MAX_AGE_DAYS=5
 
 mkdir -p "$LOG_DIR"
 
@@ -123,6 +125,31 @@ cd "$REPO" || { log "FAIL  cd 실패: $REPO"; exit 1; }
 # 평소 전력에는 영향이 없다. 배터리에서는 시스템 잠자기(-s)를 막을 수 없으므로
 # 뚜껑을 닫으면 여전히 취약하다 — 그건 상시 전원 기기로 옮겨야 풀린다.
 
+
+# **가격을 먼저 받는다** (2026-09-28 진단).
+# 09-23 회차가 시그널 23건을 냈는데 기준일이 KR 09-17 / US 09-16이었다 — 닷새 묵은
+# 가격과 지표로 판단한 것이다. 원인은 단순했다: **가격 수집이 어느 launchd 작업에도
+# 없었다.** collect는 뉴스만, baseline은 시그널만 불렀고 collect_prices.py는 손으로
+# 돌리는 것뿐이었다. 채점기는 그 어긋남을 misaligned로 걸러냈다(방어선은 작동했다).
+#
+# 시그널 직전에 받아야 기준가가 최신 종가가 된다. 실패하면 **이번 회차를 건너뛴다** —
+# `--weekly`가 as_of를 직전 수요일로 스냅하므로 같은 주 안에 다시 깨어나면 같은
+# 시점으로 재시도한다. 묵은 지표로 낸 시그널을 남기는 것보다 한 주 비는 편이 낫다
+# (오염된 표본보다 없는 표본이 깨끗하다).
+#
+# **수집기 종료코드로 판정하지 않는다.** 지수 하나가 실패해도 종료코드는 1이 되는데,
+# 지수는 채점에만 쓰이고 채점은 나중에 백필된다. 그걸로 시그널 생성을 막으면 벤더
+# 장애가 길어질 때 그 주 표본을 통째로 잃는다 — 실제로 FDR 한국 지수가 09-18부터
+# 빈 응답을 주기 시작했다. 판정은 `--check-fresh`가 **종목 봉만** 보고 따로 한다.
+log "      가격 수집 (시그널 기준가를 최신 종가로 맞춘다)"
+/usr/bin/caffeinate -im "$PYTHON" scripts/collect_prices.py >> "$LOG" 2>&1 \
+    || log "WARN  가격 수집에 실패한 대상이 있다 — 종목 신선도로 다시 판정한다"
+
+if ! "$PYTHON" scripts/collect_prices.py --check-fresh "$PRICE_MAX_AGE_DAYS" >> "$LOG" 2>&1; then
+    log "SKIP  종목 가격이 ${PRICE_MAX_AGE_DAYS}일보다 묵었다 — 묵은 지표로 시그널을 내지 않는다"
+    log "      다음 발화에서 재시도한다. --weekly가 as_of를 같은 수요일로 스냅하므로 요일은 유지된다"
+    exit 0
+fi
 
 /usr/bin/caffeinate -im "$PYTHON" scripts/run_baseline.py --weekly >> "$LOG" 2>&1
 STATUS=$?

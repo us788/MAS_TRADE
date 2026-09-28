@@ -78,7 +78,10 @@ def check_market_hours_holes(store, now):
 
     holes = []
     cur = (now - timedelta(hours=24)).astimezone(KST)
-    end = now.astimezone(KST)
+    # **진행 중인 시간은 판정하지 않는다** (2026-09-28). 수집기는 종목별 주기를 보고
+    # "아직 안 됐다"면 회차 기록을 남기지 않는다. 14:11에 점검하면 13:18에 다 받아둔
+    # 상태여도 14시가 빈 것으로 보인다 — 매일 거짓 경보가 뜨면 진짜 구멍을 흘려보낸다.
+    end = now.astimezone(KST).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     while cur <= end:
         if cur.weekday() < 5 and KR_MARKET[0] <= cur.hour < KR_MARKET[1]:
             if not seen.get((cur.date(), cur.hour)):
@@ -127,6 +130,37 @@ def check_prices(price_store, now):
     return _check("가격 적재", state, f"마지막 봉 {cov['last']} ({days}일 전) · {cov['bars']}봉")
 
 
+def check_benchmark(price_store):
+    """지수가 종목보다 뒤처지지 않았는가.
+
+    **왜 따로 보는가** (2026-09-28). FinanceDataReader의 한국 지수 계열(KS200·KS11·KQ11)이
+    09-18부터 0행을 주기 시작했다. 개별 종목은 같은 벤더에서 멀쩡히 들어왔다.
+    전체 최신 봉만 보면 종목 날짜에 가려 안 보인다 — 실제로 못 봤다.
+
+    지수가 없으면 초과수익을 못 구하고, 초과수익이 없으면 그 시장 채점이 통째로 막힌다.
+    **다만 가격은 뉴스와 달리 백필되므로 영구 손실이 아니다 → 경고다.**
+    이 항목이 OK로 돌아오는 순간이 벤더 복구 시점이고, 그때 백필하면 된다.
+    """
+    from src.data.price_sources import BENCHMARKS
+    u = load_universe()
+    lagging = []
+    for market, (index_symbol, index_name) in BENCHMARKS.items():
+        index_last = price_store.latest_date(index_symbol)
+        stock_last = max((d for d in (price_store.latest_date(h.symbol)
+                                      for h in u.market(market)) if d), default=None)
+        if stock_last is None:
+            continue
+        if index_last is None:
+            lagging.append(f"{index_name} 봉이 없다"); continue
+        behind = (stock_last - index_last).days
+        # 1일은 벤더 게시 시차로 흔히 생긴다. 그 이상이면 계열이 멈춘 것이다.
+        if behind > 1:
+            lagging.append(f"{index_name} {index_last} (종목보다 {behind}일 뒤 · {market} 채점 불가)")
+    if not lagging:
+        return _check("벤치마크 지수", OK, "종목과 같은 날짜까지 들어와 있다")
+    return _check("벤치마크 지수", WARN, " · ".join(lagging))
+
+
 def check_disk(repo):
     out = subprocess.run(["df", "-g", str(repo)], capture_output=True, text=True).stdout
     free = int(out.strip().split("\n")[-1].split()[3])
@@ -137,7 +171,7 @@ def check_disk(repo):
 def check_scheduler(repo):
     """launchd 작업이 등록돼 있고 마지막 종료 코드가 0인가."""
     results = []
-    for job in ("collect", "baseline"):
+    for job in ("collect", "prices", "baseline"):
         label = f"com.ys.mastrade.{job}"
         out = subprocess.run(["launchctl", "print", f"gui/{__import__('os').getuid()}/{label}"],
                              capture_output=True, text=True)
@@ -148,7 +182,7 @@ def check_scheduler(repo):
         if code not in ("0", "(never exited)"):
             results.append(f"{job} 종료코드 {code}")
     if not results:
-        return _check("스케줄러", OK, "collect · baseline 둘 다 정상")
+        return _check("스케줄러", OK, "collect · prices · baseline 모두 정상")
     return _check("스케줄러", WARN, " · ".join(results))
 
 
@@ -167,6 +201,7 @@ def main() -> int:
         check_collection_freshness(store, now),
         check_gaps(store),
         check_prices(price_store, now),
+        check_benchmark(price_store),
         check_baseline(signal_store, now),
         check_scheduler(repo),
         check_disk(repo),

@@ -9,6 +9,7 @@
     python scripts/collect_prices.py --years 3        3년치 초기 적재
     python scripts/collect_prices.py --market KR
     python scripts/collect_prices.py --symbol 005930 --years 1
+    python scripts/collect_prices.py --check-fresh 5   호출 없이 신선도만 판정 (종료코드)
 
 설계 근거는 docs/harness.md.
 """
@@ -54,6 +55,39 @@ def plan_range(store, symbol, years, today):
     return (min(start, floor) if start > floor else start), today
 
 
+def check_fresh(store, max_age_days):
+    """호출 없이 저장된 봉만 보고 **종목**이 충분히 최신인지 판정한다.
+
+    **왜 종목만 보는가** (2026-09-28). 시그널의 기준가는 종목 종가다. 지수는 채점에만
+    쓰이고 채점은 나중에 백필된다 — 지수가 막혔다고 시그널 생성을 막으면, 벤더 장애가
+    길어질 때 그 주 표본을 통째로 잃는다. 실제로 FDR 한국 지수 계열이 09-18부터
+    빈 응답을 주기 시작했고, 그 하나 때문에 수집기 종료코드가 1이 됐다.
+
+    반대로 **종목이 묵으면 시그널을 내면 안 된다.** 09-23 회차가 닷새 묵은 종가를
+    기준가로 써서 23건이 misaligned로 걸러졌다. 오염된 표본보다 없는 표본이 깨끗하다.
+
+    주말·연휴가 있으므로 달력일 기준으로 넉넉히 본다.
+    """
+    universe = load_universe()
+    today = date.today()
+    stale = []
+    for market in ("KR", "US"):
+        for h in universe.market(market):
+            last = store.latest_date(h.symbol)
+            if last is None:
+                stale.append(f"{market} {h.name} 봉 없음"); continue
+            age = (today - last).days
+            if age > max_age_days:
+                stale.append(f"{market} {h.name} {last} ({age}일 전)")
+    if not stale:
+        print(f"신선도 OK — 전 종목이 {max_age_days}일 안의 봉을 갖고 있다")
+        return 0
+    print(f"신선도 미달 {len(stale)}건 (기준 {max_age_days}일)")
+    for line in stale:
+        print(f"  {line}")
+    return 1
+
+
 def show_status(store):
     c = store.counts()
     print(f"봉 {c['total']:,}개 · 종목 {c['symbols']}개 · 수정 이력 {c['revisions']}건")
@@ -89,11 +123,16 @@ def main() -> int:
                          "미완결 봉이 저장돼 정정이 거부된 경우에 쓴다")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--check-fresh", type=int, metavar="DAYS",
+                    help="호출 없이 저장된 봉만 보고 종목 신선도를 판정한다. "
+                         "미달이면 종료코드 1 (지수는 보지 않는다 — 이유는 check_fresh)")
     args = ap.parse_args()
 
     store = PriceStore()
     if args.status:
         return show_status(store)
+    if args.check_fresh is not None:
+        return check_fresh(store, args.check_fresh)
 
     markets = args.market or ["KR", "US"]
     today = date.today()
