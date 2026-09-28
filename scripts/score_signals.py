@@ -85,11 +85,21 @@ def main() -> int:
             line = f"  {n:>2}거래일  채점 {sm['scored']}/{sm['signals']}"
             if sm["scored"]:
                 c = sm["confidence_correlation"]
-                line += (f"  적중률 {sm['hit_rate']:.3f}"
-                         if sm["hit_rate"] is not None else "  적중률 -")
+                if sm["hit_rate"] is not None:
+                    line += f"  적중률 {sm['hit_rate']:.3f}"
+                    ci = sm["hit_rate_ci"]
+                    if ci:
+                        # 구간이 0.5를 품으면 동전과 구분되지 않는다. 그게 보이게 찍는다.
+                        mark = " " if ci[0] > 0.5 or ci[1] < 0.5 else "~"
+                        line += f"[{ci[0]:.2f},{ci[1]:.2f}]{mark}"
+                else:
+                    line += "  적중률 -"
                 if sm["mean_excess"] is not None:
                     line += (f"  평균초과 {sm['mean_excess']*100:+.2f}%"
                              f"  비용후 {sm['mean_excess_after_cost']*100:+.2f}%")
+                    ci = sm["mean_excess_ci"]
+                    if ci:
+                        line += f"[{ci[0]*100:+.2f},{ci[1]*100:+.2f}]%p"
                 if c["spearman"] is not None:
                     line += f"  확신도상관 {c['spearman']:+.3f}(n={c['n']})"
             print(line)

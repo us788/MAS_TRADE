@@ -241,6 +241,14 @@ def summarize(scored: Sequence[ScoredSignal], trading_days: int) -> dict:
                                  "mean_excess": metrics.mean(sub)}
 
     holds = sum(1 for s, h in done if s.direction == "hold")
+
+    # **점추정만 보고하지 않는다** (2026-09-28). 적중률 0.444를 내놓고 "n=15라
+    # 해석하지 않는다"를 말로 덧붙였는데, 말은 다음 사람에게 전달되지 않는다.
+    # 구간이 0.5를 품으면 그 숫자는 동전과 구분되지 않는다는 뜻이고, 그게 보인다.
+    measurable = [d for d in directional if d is not None]
+    hit_ci = metrics.proportion_ci(sum(1 for d in measurable if d > 0),
+                                   len(measurable)) if measurable else None
+
     return {
         "trading_days": trading_days,
         "signals": len(rows),
@@ -248,7 +256,9 @@ def summarize(scored: Sequence[ScoredSignal], trading_days: int) -> dict:
         "by_status": by_status,
         "hold_ratio": (holds / len(done)) if done else None,
         "hit_rate": metrics.hit_rate(directional),
+        "hit_rate_ci": hit_ci,
         "mean_excess": metrics.mean(directional),
+        "mean_excess_ci": metrics.mean_ci(directional),
         "mean_excess_after_cost": metrics.mean(after_cost),
         "confidence_correlation": metrics.correlation(conf, ret),
         "by_regime": by_regime,
