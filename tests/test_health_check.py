@@ -55,6 +55,29 @@ def test_장중에_빈_시간이_있으면_심각이다():
         assert r["state"] == hc.CRIT and "2시간" in r["detail"]
 
 
+def test_단발_구멍은_경고에_그친다():
+    """수집기가 "받을 게 없다"고 건너뛴 한 시간은 손실이 아니다.
+
+    단발까지 심각으로 올리면 매일 울리고, 그러면 진짜 구멍을 흘려보낸다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        cur = NOW - timedelta(hours=24)
+        while cur <= NOW:
+            k = cur.astimezone(KST)
+            if not (k.hour == 11 and k.weekday() < 5):     # 장중 한 시간만 비움
+                _run(s, "005930", cur)
+            cur += timedelta(hours=1)
+        r = hc.check_market_hours_holes(s, NOW)
+        assert r["state"] == hc.WARN and "최장 연속 1" in r["detail"]
+
+
+def test_붙어있는_시간만_연속으로_센다():
+    assert hc._adjacent_hour("09-28 11시", "09-28 12시")
+    assert not hc._adjacent_hour("09-28 11시", "09-28 13시")
+    assert not hc._adjacent_hour("09-27 15시", "09-28 09시")   # 날이 다르면 안 잇는다
+
+
 def test_장_밖의_빈_시간은_문제가_아니다():
     """야간 구멍은 다음 수집의 lookback이 메운다."""
     with tempfile.TemporaryDirectory() as tmp:

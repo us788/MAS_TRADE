@@ -65,6 +65,12 @@ def check_collection_freshness(store, now):
     return _check("수집 신선도", state, f"{len(late)}종목 주기 초과 — {detail}")
 
 
+def _adjacent_hour(a: str, b: str) -> bool:
+    """"09-28 11시"와 "09-28 12시"처럼 붙어 있는가. 장 시작 전후는 안 잇는다."""
+    (da, ha), (db, hb) = [(x[:5], int(x[6:-1])) for x in (a, b)]
+    return da == db and hb == ha + 1
+
+
 def check_market_hours_holes(store, now):
     """지난 24시간 한국 장중에 시간당 수집 기록이 있는가."""
     since = (now - timedelta(hours=24)).isoformat()
@@ -89,9 +95,22 @@ def check_market_hours_holes(store, now):
         cur += timedelta(hours=1)
     if not holes:
         return _check("한국 장중 커버리지", OK, "지난 24시간 장중에 빈 시간 없음")
-    return _check("한국 장중 커버리지", CRIT,
-                  f"{len(holes)}시간 비어 있다 — {', '.join(holes[:8])} "
-                  f"(과거 뉴스는 다시 살 수 없다)")
+
+    # **단발 구멍과 연속 구멍을 가른다** (2026-09-28).
+    # 수집기는 종목별 주기를 보고 "이번 시간엔 받을 게 없다"면 회차를 남기지 않는다.
+    # 그런 한 시간은 손실이 아니다 — 다음 회차의 lookback이 덮는다.
+    # **영구 손실은 연속으로 멈췄을 때 생긴다.** 1,000건 한도에 잘리려면 몇 시간이
+    # 쌓여야 한다. 단발까지 심각으로 올리면 매일 울리고, 그러면 진짜를 흘려보낸다.
+    longest = run = 1
+    for a, b in zip(holes, holes[1:]):
+        run = run + 1 if _adjacent_hour(a, b) else 1
+        longest = max(longest, run)
+    state = CRIT if longest >= 2 else WARN
+    tail = ("과거 뉴스는 다시 살 수 없다" if state is CRIT
+            else "단발이라 다음 회차 lookback이 덮는다")
+    return _check("한국 장중 커버리지", state,
+                  f"{len(holes)}시간 비어 있다 (최장 연속 {longest}) — "
+                  f"{', '.join(holes[:8])} ({tail})")
 
 
 def check_gaps(store):

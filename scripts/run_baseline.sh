@@ -141,6 +141,16 @@ cd "$REPO" || { log "FAIL  cd 실패: $REPO"; exit 1; }
 # 지수는 채점에만 쓰이고 채점은 나중에 백필된다. 그걸로 시그널 생성을 막으면 벤더
 # 장애가 길어질 때 그 주 표본을 통째로 잃는다 — 실제로 FDR 한국 지수가 09-18부터
 # 빈 응답을 주기 시작했다. 판정은 `--check-fresh`가 **종목 봉만** 보고 따로 한다.
+# **돈도 벤더 호출도 쓰기 전에 "할 일이 있나"부터 묻는다** (2026-09-28).
+# 이 작업은 네트워크 변경마다 발화한다 — 실측 분당 3회다. 가격 수집을 앞에 두자마자
+# **발화할 때마다 32종목을 내려받기 시작했고**, 2시간 만에 price_gaps 241건이 쌓이고
+# yfinance가 일부 종목을 거절했다. 주간 가드는 `run_baseline.py` 안에 있으므로
+# 그 판정을 `--check-due`로 먼저 꺼내 쓴다 (벤더도 LLM도 부르지 않는다).
+if ! "$PYTHON" scripts/run_baseline.py --weekly --check-due >> "$LOG" 2>&1; then
+    log "SKIP  이번 주는 이미 다 돌렸다 — 가격도 받지 않는다"
+    exit 0
+fi
+
 log "      가격 수집 (시그널 기준가를 최신 종가로 맞춘다)"
 /usr/bin/caffeinate -im "$PYTHON" scripts/collect_prices.py >> "$LOG" 2>&1 \
     || log "WARN  가격 수집에 실패한 대상이 있다 — 종목 신선도로 다시 판정한다"

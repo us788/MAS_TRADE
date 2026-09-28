@@ -86,6 +86,9 @@ def main() -> int:
                          "시점이면 건너뛴다. launchd 주간 작업이 쓴다")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--check-due", action="store_true",
+                    help="이번 주 돌릴 것이 남았는지만 본다. 있으면 종료코드 0, 없으면 1. "
+                         "벤더도 LLM도 부르지 않는다")
     args = ap.parse_args()
 
     store = SignalStore()
@@ -103,6 +106,18 @@ def main() -> int:
         return 2
 
     markets = args.market or ["KR", "US"]
+
+    # **돈이 나가기 전에 물어볼 수 있게 한다** (2026-09-28).
+    # 래퍼가 시그널 직전에 가격을 받도록 고쳤는데, baseline 작업은 네트워크 변경마다
+    # 발화한다(분당 3회 관측). 그래서 "이미 돌렸습니다"에 도달하기 전에 **매번 32종목을
+    # 내려받았다** — 2시간 만에 벤더 호출 수천 건, price_gaps 241건, yfinance가
+    # UNH·XOM을 거절하기 시작했다. 값싼 판정을 앞에 세워 그 경로를 끊는다.
+    if args.check_due:
+        due = [m for m in markets
+               if not (args.weekly and store.has_successful_run("baseline", m, as_of))]
+        print(f"{as_of.isoformat()}  남은 시장 {due or '없음'}")
+        return 0 if due else 1
+
     builder = ContextBuilder()
     universe = load_universe()
     total_ok = total = 0
