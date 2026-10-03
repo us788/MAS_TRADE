@@ -30,10 +30,19 @@ from datetime import date, datetime, timedelta, timezone
 
 from src.data.prices import Bar, known_trading_date
 
-# 벤치마크 지수. 적중 판정이 지수 대비 초과라 채점에 반드시 필요하다 (harness.md 4.1).
+# 벤치마크. 적중 판정이 지수 대비 초과라 채점에 반드시 필요하다 (harness.md 4.1).
+#
+# **KR은 2026-10-01에 `KS200` → `069500`(KODEX 200 ETF)으로 바꿨다.**
+# FDR의 한국 지수 계열(KS200·KS11·KQ11)이 2026-09-18부터 갱신을 멈췄다. 기록돼 있던
+# "빈 응답"은 간헐적 장애였고, 실제 상태는 **계열 동결**이다 — 3년 구간을 요청하면
+# 721행이 오는데 마지막이 09-17이다. 기다려도 그 구간은 오지 않는다. 같은 벤더에서
+# ETF·개별주는 정상으로 온다.
+#
+# **ETF는 지수가 아니다.** 분배금과 보수만큼 계통적으로 뒤처진다. 전환 시점 전후
+# 성적을 섞지 않는다(기획서 7절). 실측치는 docs/journal/2026-10-01.md.
 BENCHMARKS: dict[str, tuple[str, str]] = {
     "US": ("^GSPC", "S&P500"),
-    "KR": ("KS200", "KOSPI200"),
+    "KR": ("069500", "KODEX200"),
 }
 
 
@@ -112,7 +121,7 @@ def fetch_us(symbol: str, start: date, end: date, market: str = "US") -> list[Ba
 
 
 def fetch_kr(symbol: str, start: date, end: date, market: str = "KR") -> list[Bar]:
-    """FinanceDataReader. 종목(`005930`)과 지수(`KS200`) 모두 같은 경로다.
+    """FinanceDataReader. 종목(`005930`)과 벤치마크(`069500`) 모두 같은 경로다.
 
     수정주가 하나만 오므로 `close_px = close_tr`다. 이유는 모듈 docstring 참고.
     """

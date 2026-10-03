@@ -18,6 +18,7 @@ as_of 전용 인터페이스만 주입한다 (`docs/harness.md` 3.1절).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Iterable, Sequence
@@ -213,6 +214,54 @@ class Scorer:
 
 
 # ---- 집계 ----
+
+#: 겹침 보정에서 솎는 간격. 시그널이 주 1회이므로 5거래일(=1주)은 겹치지 않고,
+#: 20거래일(=4주)은 인접 표본이 4배 겹친다.
+OVERLAP_THIN = {5: 1, 20: 4}
+
+
+def overlap_corrected(scored: Sequence[ScoredSignal], trading_days: int,
+                      thin: int | None = None) -> dict:
+    """겹침을 보정한 날짜평균과 t값.
+
+    **명목 표본을 그대로 t검정에 넣으면 유의성이 과장된다** (docs/baselines.md 3.1).
+    두 겹의 중복이 있다.
+
+    1. **같은 날 여러 종목은 독립이 아니다.** 같은 시장 같은 날이면 서로 상관된다.
+       → 날짜별 평균 초과수익을 **관측 1건**으로 묶는다.
+    2. **주 1회 시그널을 20거래일로 채점하면 인접 주가 4배 겹친다.** 같은 사건을
+       네 번 세는 것이다. → `thin` 간격으로 솎는다.
+
+    2026-09-16 측정 당시 이 계산은 세션에서 일회성으로 돌렸고 코드에 남지 않았다.
+    그래서 `docs/baselines.md`의 주 표가 **재현 불가 상태였다**. 2026-10-01 벤치마크
+    교체로 숫자를 다시 내면서 여기로 옮긴다.
+
+    비용 전 초과수익(`directional`)을 쓴다 — 문서의 "날짜평균"이 그 값이다.
+    """
+    thin = OVERLAP_THIN.get(trading_days, 1) if thin is None else thin
+
+    by_date: dict = {}
+    for s in scored:
+        h = s.horizons.get(trading_days)
+        if h is None or h.status != "scored" or h.directional is None:
+            continue
+        by_date.setdefault(s.as_of.date(), []).append(h.directional)
+
+    dates = sorted(by_date)[::thin]
+    values = [metrics.mean(by_date[d]) for d in dates]
+    values = [v for v in values if v is not None]
+
+    mean = metrics.mean(values)
+    sd = metrics.stdev(values)
+    t = None
+    if mean is not None and sd is not None and sd > metrics.ZERO_VARIANCE_TOL \
+            and len(values) > 1:
+        t = mean / (sd / math.sqrt(len(values)))
+
+    return {"trading_days": trading_days, "thin": thin,
+            "observations": len(values), "date_mean": mean, "t": t}
+
+
 
 def summarize(scored: Sequence[ScoredSignal], trading_days: int) -> dict:
     """호라이즌 하나에 대한 집계. 기획서 9.1절 측정 항목.

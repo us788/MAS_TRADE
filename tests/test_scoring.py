@@ -13,11 +13,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src.data.price_sources import BENCHMARKS
 from src.data.prices import Bar, PriceStore
-from src.eval.scoring import COSTS, Scorer, summarize
+from src.eval.scoring import (COSTS, HorizonScore, Scorer, ScoredSignal,
+                              overlap_corrected, summarize)
 
 KST = ZoneInfo("Asia/Seoul")
-KR_INDEX = "KS200"
+# 벤치마크 심볼을 테스트에 박지 않는다 — 벤더 장애로 바뀔 수 있다 (2026-10-01 실제로 바꿨다).
+KR_INDEX = BENCHMARKS["KR"][0]
 
 
 @dataclass
@@ -192,3 +195,47 @@ def test_집계에_레짐_분해가_들어간다():
         r = scorer.score(Sig("005930", "KR", datetime(2026, 1, 5, 16, 0, tzinfo=KST), "buy"))
         s = summarize([r], 5)
         assert "by_regime" in s and "confidence_correlation" in s
+
+
+# -------------------------------------------------------------- 겹침 보정
+
+def _scored(day: int, symbol: str, excess: float, n: int = 5):
+    """날짜·종목·초과수익만 가진 최소 채점 결과."""
+    return ScoredSignal(
+        symbol=symbol, market="KR",
+        as_of=datetime(2026, 1, day, 7, 0, tzinfo=KST),
+        direction="buy", confidence=0.5,
+        base_date=date(2026, 1, day), base_price=100.0,
+        horizons={n: HorizonScore(n, "scored", directional=excess)},
+    )
+
+
+def test_같은_날_여러_종목은_관측_한_건으로_묶인다():
+    """같은 시장 같은 날 15종목은 서로 상관된다. 15건으로 세면 t가 부풀려진다."""
+    rows = [_scored(7, "005930", 0.02), _scored(7, "000660", 0.04),
+            _scored(14, "005930", 0.01), _scored(14, "000660", 0.03)]
+    c = overlap_corrected(rows, 5)
+    assert c["observations"] == 2                       # 4건이 아니라 2건
+    assert math.isclose(c["date_mean"], (0.03 + 0.02) / 2)
+
+
+def test_20거래일은_4주_간격으로_솎는다():
+    """주 1회 시그널을 20거래일로 채점하면 인접 주가 4배 겹친다."""
+    rows = [_scored(d, "005930", 0.01, n=20) for d in (5, 12, 19, 26)]
+    c = overlap_corrected(rows, 20)
+    assert c["thin"] == 4 and c["observations"] == 1
+    assert overlap_corrected(rows, 20, thin=1)["observations"] == 4
+
+
+def test_채점되지_않은_것은_들어가지_않는다():
+    rows = [_scored(7, "005930", 0.02),
+            ScoredSignal("000660", "KR", datetime(2026, 1, 14, 7, 0, tzinfo=KST),
+                         "buy", 0.5, None, None,
+                         {5: HorizonScore(5, "pending")})]
+    assert overlap_corrected(rows, 5)["observations"] == 1
+
+
+def test_분산이_0이면_t를_내지_않는다():
+    """stdev([0.1,0.1,0.1])은 0이 아니라 1.7e-17이다 (2026-09-28)."""
+    rows = [_scored(d, "005930", 0.1) for d in (7, 14, 21)]
+    assert overlap_corrected(rows, 5)["t"] is None

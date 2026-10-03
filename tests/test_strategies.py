@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src.data.price_sources import BENCHMARKS
 from src.data.prices import Bar, PriceStore
 from src.eval.strategies import (CONF_MAX, CONF_MIN, BuyAndHold, Momentum,
                                  Strategy, StrategyRunner)
@@ -94,7 +95,7 @@ def _store(tmp):
             days.append(cur)
         cur += timedelta(days=1)
     cut = date(2026, 3, 3)          # AS_OF(3/4 07:00 KST)가 알 수 있는 마지막 거래일
-    for symbol, market in (("005930", "KR"), ("KS200", "INDEX")):
+    for symbol, market in (("005930", "KR"), (BENCHMARKS["KR"][0], "INDEX")):
         bars = []
         for i, d in enumerate(days):
             # 기준일 이후 구간만 10배로 띄운다. 이게 점수에 섞이면 룩어헤드다.
@@ -114,7 +115,8 @@ def test_기준일_이후_봉은_점수에_들어가지_않는다():
         bars = store.series("005930", "KR", AS_OF, lookback_days=400)
         assert bars, "봉이 있어야 한다"
         assert max(b.date for b in bars) <= date(2026, 3, 3)   # 미래가 안 섞였다
-        score = st.score(bars, store.series("KS200", "KR", AS_OF, lookback_days=400))
+        score = st.score(bars, store.series(BENCHMARKS["KR"][0], "KR",
+                                            AS_OF, lookback_days=400))
         # 10배 급등이 섞였다면 점수가 터무니없이 커진다
         assert score is not None and abs(score) < 1.0
 

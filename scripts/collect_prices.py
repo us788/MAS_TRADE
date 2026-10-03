@@ -46,13 +46,18 @@ def targets(markets, symbols):
 
 
 def plan_range(store, symbol, years, today):
-    """받을 구간. 이미 있으면 마지막 봉 근처부터 이어받는다."""
+    """받을 구간. 이미 있으면 마지막 봉 근처부터 이어받는다.
+
+    **2026-10-01 정정.** `min(start, floor)`로 적혀 있어 두 갈래가 모두 더 이른 쪽을
+    돌려줬다 — 즉 매 실행이 3년 전체를 다시 요청했다. `OVERLAP_DAYS`도 위 docstring도
+    사문이었다. 09-28에 2시간 만에 벤더 호출이 수천 건 난 원인 중 하나다.
+    """
     floor = today - timedelta(days=int(365.25 * years))
     last = store.latest_date(symbol)
     if last is None:
         return floor, today
     start = last - timedelta(days=OVERLAP_DAYS)
-    return (min(start, floor) if start > floor else start), today
+    return max(start, floor), today
 
 
 def check_fresh(store, max_age_days):

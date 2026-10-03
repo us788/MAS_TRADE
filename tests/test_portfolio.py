@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src.data.price_sources import BENCHMARKS
 from src.data.prices import Bar, PriceStore
 from src.eval.portfolio import VirtualPortfolio
 from src.eval.scoring import COSTS
@@ -44,7 +45,8 @@ def _store(tmp, prices, market="KR"):
     for symbol, px in prices.items():
         s.upsert([Bar(symbol, market, d, close_px=p, close_tr=p, source="t")
                   for d, p in zip(days, px)])
-    s.upsert([Bar("KS200", "INDEX", d, close_px=100.0, close_tr=100.0, source="t")
+    s.upsert([Bar(BENCHMARKS["KR"][0], "INDEX", d,
+                  close_px=100.0, close_tr=100.0, source="t")
               for d in days])
     return s, days
 

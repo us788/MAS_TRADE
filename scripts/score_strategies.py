@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.prices import PriceStore
 from src.eval.benchmarks import SIGNAL_HOUR, SIGNAL_TZ, signal_dates
-from src.eval.scoring import HORIZONS, Scorer, summarize
+from src.eval.scoring import HORIZONS, Scorer, overlap_corrected, summarize
 from src.eval.strategies import ALL_STRATEGIES, StrategyRunner
 
 # 지표 계산에 필요한 과거 구간. 이만큼 지난 뒤부터 시그널을 낸다.
@@ -35,6 +35,9 @@ def main() -> int:
     ap.add_argument("--market", choices=("KR", "US"), action="append")
     ap.add_argument("--from", dest="start", default=None, help="YYYY-MM-DD")
     ap.add_argument("--to", dest="end", default=None, help="YYYY-MM-DD")
+    ap.add_argument("--overlap", action="store_true",
+                    help="겹침 보정 표를 함께 낸다 (날짜평균·t값). "
+                         "docs/baselines.md의 주 표가 이것이다")
     args = ap.parse_args()
 
     store = PriceStore()
@@ -59,6 +62,7 @@ def main() -> int:
                  f"{'평균초과':>9s} {'비용후':>9s} {'확신도상관':>10s}"
         print(header)
 
+        corrected = []
         for strategy in ALL_STRATEGIES:
             signals = []
             for d in dates:
@@ -69,6 +73,9 @@ def main() -> int:
                 print(f"  {strategy.name:16s} 시그널 없음 (구간이 짧습니다)")
                 continue
             scored = scorer.score_many(signals)
+            if args.overlap:
+                corrected.extend((strategy.name, overlap_corrected(scored, n))
+                                 for n in HORIZONS)
             for n in HORIZONS:
                 sm = summarize(scored, n)
                 if not sm["scored"]:
@@ -80,6 +87,22 @@ def main() -> int:
                 print(f"  {strategy.name:16s} {n:>4}일 {sm['scored']:>6,} "
                       f"{sm['hit_rate']:>7.3f} {sm['mean_excess']*100:>8.2f}% "
                       f"{sm['mean_excess_after_cost']*100:>8.2f}% {corr:>10s}")
+
+        if args.overlap:
+            print(f"\n  ── 겹침 보정 (날짜평균 1건으로 묶고 솎는다) ──")
+            print(f"  {'전략':16s} {'H':>4s} {'독립관측':>8s} {'날짜평균':>9s} "
+                  f"{'t':>7s}")
+            for name, c in corrected:
+                if not c["observations"]:
+                    continue
+                star = ""
+                if c["t"] is not None:
+                    star = "**" if abs(c["t"]) >= 1.96 else (
+                        "*" if abs(c["t"]) >= 1.65 else "")
+                tv = f"{c['t']:+.2f}" if c["t"] is not None else "   -  "
+                print(f"  {name:16s} {c['trading_days']:>4} "
+                      f"{c['observations']:>8,} {c['date_mean']*100:>8.2f}% "
+                      f"{tv:>7s} {star}")
         print()
     return 0
 
