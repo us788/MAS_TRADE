@@ -112,6 +112,11 @@ def compute_lookback_days(
 #: 페이지 상한에 걸려 못 받은 구간은 영구 손실이므로 자동으로 닫지 않는다.
 COVERAGE_SHORTFALL = "커버리지 미달"
 
+#: 페이지 상한에 걸렸지만 **직전 회차와 겹쳐 손실은 없는** 경우의 알림 접두사.
+#: gap이 아니다 — 세면 영구 손실 지표가 오염된다. 다만 상한에 가까워졌다는
+#: 선행 신호이므로 화면에는 띄운다.
+PAGE_CAP_NOTE = "페이지 상한"
+
 
 def collect_one(store: Store, adapter, plan: Plan, as_of: datetime) -> tuple[NewsBatch | None, str]:
     """한 종목을 수집해 저장한다. 실패는 예외를 올리지 않고 사유를 돌려준다."""
@@ -141,17 +146,40 @@ def collect_one(store: Store, adapter, plan: Plan, as_of: datetime) -> tuple[New
         inserted=result.written, duplicates=result.skipped_duplicate,
     )
 
-    if batch.reached_floor:
-        # lookback 구간을 끝까지 덮었다면 그 안의 **수집 실패** gap은 이 수집이 메웠다.
-        # lookback은 "마지막 성공 수집 이후 × 1.5"라 실패가 이어졌으면 그만큼 늘어난다.
+    # **실제로 받아온 구간**을 증거로 그 안의 수집 실패 gap을 닫는다.
+    #
+    # 2026-10-06 정정. 이 호출이 `if batch.reached_floor:` 안에 있었다. 그러면
+    # **구멍을 실제로 메운 바로 그 회차**가 페이지 상한에 걸렸을 때 공적을 인정받지
+    # 못한다. 게다가 그 회차는 `record_run`으로 이력에 남아 lookback 시계를
+    # 전진시키므로, 이후 어떤 창에도 그 gap이 다시 들어오지 않는다 — **영원히 못 닫는다.**
+    # 09-22의 gap 4건이 2주 동안 그렇게 열려 있었다.
+    #
+    # 경계는 "요청한 구간"이 아니라 "닿은 구간"이다. 끝까지 덮었으면 floor까지,
+    # 아니면 실제로 본 가장 오래된 기사(`oldest_seen`)까지만 주장한다.
+    # floor보다 과거는 `filter_as_of`가 버리므로 덮었다고 말할 수 없다.
+    floor = as_of - timedelta(days=plan.lookback_days)
+    covered_from = floor if batch.reached_floor else batch.oldest_seen
+    if covered_from is not None:
         # 커버리지 미달 gap은 재수집으로 메워지지 않으므로 손대지 않는다.
-        floor = as_of - timedelta(days=plan.lookback_days)
-        store.resolve_gaps_covered(holding.symbol, plan.source, floor, as_of,
+        store.resolve_gaps_covered(holding.symbol, plan.source, covered_from, as_of,
                                    exclude_prefix=COVERAGE_SHORTFALL)
 
     if not batch.reached_floor:
-        # 페이지 상한에 걸려 lookback 구간을 다 못 받았다. 그 앞은 영구 손실이므로
-        # 기록해 두고 주기를 줄여야 한다.
+        # **손실 판정의 기준은 직전 성공 수집이지 floor가 아니다.**
+        #
+        # 2026-10-06 정정. lookback이 "마지막 성공 이후 × 1.5"라 floor는 직전 회차가
+        # 이미 덮은 구간까지 **일부러** 파고든다(겹쳐 받고 중복은 DB가 막는다).
+        # 거기 못 닿은 것은 못 받은 것이 아닌데, `reached_floor`만 보고 영구 손실로
+        # 기록하고 있었다. 09-22의 "영구 손실 2건"은 둘 다 직전 회차와 겹쳤다.
+        #
+        # 진짜 손실은 이번에 받은 가장 오래된 기사가 **직전 회차 시각보다 뒤**일 때다
+        # — 그 사이가 아무에게도 안 덮인 구간이다.
+        prior = _utc(plan.last_run) if plan.last_run else None
+        oldest = _utc(batch.oldest_seen) if batch.oldest_seen else None
+        if prior is not None and oldest is not None and oldest <= prior:
+            # 상한에는 걸렸지만 구멍은 없다. gap으로 세지 않는다.
+            return batch, (f"{PAGE_CAP_NOTE}: {batch.pages}페이지에서 멈췄다 "
+                           f"(최古 {oldest:%m-%d %H:%M} ≤ 직전 수집 {prior:%m-%d %H:%M})")
         reason = (f"{COVERAGE_SHORTFALL}: {batch.pages}페이지로 {plan.lookback_days:.2f}일을 "
                   f"덮지 못함 (최古 {batch.oldest_seen})")
         store.record_gap(holding.market, plan.source, holding.symbol, reason, as_of)

@@ -433,6 +433,38 @@ class PriceStore:
             conn.execute("UPDATE price_gaps SET resolved_at = ? WHERE id = ?",
                          (datetime.now(timezone.utc).isoformat(), gap_id))
 
+    def resolve_covered_gaps(self, symbol: str | None = None,
+                             apply: bool = False) -> list[dict]:
+        """**지금 저장된 봉이 덮고 있는** 열린 gap을 닫는다.
+
+        2026-10-06에 만들었다. 그전까지 가격 쪽에는 **자동 해소 경로가 아예 없었다** —
+        `resolve_gap`을 부르는 것이 테스트뿐이어서, 일시적 벤더 실패가 복구된 뒤에도
+        기록은 영원히 열린 채였다. 그래서 `열린 gap N건`이 지표로 쓸 수 없는 수였다
+        (10-01 기준 257건 중 247건이 더는 조회하지도 않는 심볼이었다).
+
+        **판정 근거는 봉 자체다.** 뉴스와 달리 가격은 과거를 다시 받을 수 있으므로,
+        "그 구간을 지금 갖고 있나"가 곧 복구 여부다. 저장된 구간이 gap 구간을 양쪽으로
+        감싸면(`first <= from_date` 이고 `last >= to_date`) 그 실패는 메워진 것이다.
+
+        **결측평일은 보지 않는다.** 공휴일이 거기 걸리므로(KR 3년에 57일) 그걸 조건에
+        넣으면 어떤 gap도 안 닫힌다. 결측 급증은 `missing_weekdays`가 따로 본다.
+
+        `apply=False`면 무엇이 닫힐지만 돌려준다 (파괴적 동작은 명시적으로만).
+        """
+        rows = []
+        for gap in self.open_gaps():
+            if symbol is not None and gap["symbol"] != symbol:
+                continue
+            cov = self.coverage(gap["symbol"])
+            if not cov["first"] or not cov["last"]:
+                continue
+            if cov["first"] <= gap["from_date"] and cov["last"] >= gap["to_date"]:
+                rows.append(gap)
+        if apply:
+            for gap in rows:
+                self.resolve_gap(gap["id"])
+        return rows
+
     def missing_weekdays(self, symbol: str) -> list[date]:
         """저장된 구간 안에서 **평일인데 봉이 없는** 날.
 

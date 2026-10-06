@@ -327,8 +327,14 @@ class Store:
         """이미 쌓인 열린 gap 중 **재수집이 실제로 덮은 것**을 찾아 닫는다.
 
         판정 근거는 추측이 아니라 `collection_runs.oldest_seen`이다 — 그 종목의
-        이후 수집이 gap 시각보다 더 과거까지 닿았고(`oldest_seen <= gap.at`)
-        lookback 구간을 끝까지 덮었다면(`reached_floor = 1`) 그 구멍은 메워진 것이다.
+        이후 수집이 gap 시각보다 더 과거까지 닿았다면(`oldest_seen <= gap.at`)
+        그 구멍은 메워진 것이다.
+
+        **2026-10-06 정정.** 여기에 `reached_floor = 1`이 같이 걸려 있었다. 그런데
+        `oldest_seen <= gap.at`이면 그 회차가 gap 시각보다 과거까지 실제로 닿았다는
+        뜻이고 그게 증거의 전부다. `reached_floor`는 "요청한 구간을 끝까지 덮었나"라서
+        **페이지 상한에 걸린 회차는 구멍을 메우고도 0이 된다.** 두 조건을 함께 걸면
+        바로 그 회차가 배제돼 gap이 영영 안 닫혔다.
 
         `apply=False`면 무엇이 닫힐지만 돌려준다 (파괴적 동작은 명시적으로만).
         """
@@ -339,7 +345,7 @@ class Store:
               AND EXISTS (
                 SELECT 1 FROM collection_runs r
                 WHERE r.symbol = g.symbol AND r.source = g.source
-                  AND r.ran_at > g.at AND r.reached_floor = 1
+                  AND r.ran_at > g.at
                   AND r.oldest_seen IS NOT NULL AND r.oldest_seen <= g.at)
         """
         params: list = []

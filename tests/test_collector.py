@@ -8,9 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.data.collector import (
+    COVERAGE_SHORTFALL,
     DUE_SLACK,
     MAX_LOOKBACK_DAYS,
     MIN_LOOKBACK_HOURS,
+    PAGE_CAP_NOTE,
     Plan,
     build_plan,
     collect_one,
@@ -238,3 +240,88 @@ def test_다른_종목의_gap은_건드리지_않는다():
         store.record_gap("KR", "naver", "000660", "VendorError", NOW - timedelta(hours=2))
         n = store.resolve_gaps_covered("005930", "naver", NOW - timedelta(hours=3), NOW)
         assert n == 0 and len(store.open_gaps()) == 1
+
+
+# ---- 2026-10-06: 09-22의 gap 4건이 2주 열려 있던 이유 ----
+
+class _CapButCovered:
+    """페이지 상한에 걸렸지만 **직전 회차보다 과거까지** 닿은 어댑터.
+
+    09-22에 실제로 일어난 모양이다. 10페이지 1,000건으로 상한에 걸렸는데
+    그 1,000건이 직전 성공 회차 시각보다 더 과거까지 닿았다.
+    """
+
+    def __init__(self, oldest):
+        self.oldest = oldest
+
+    def collect(self, symbol, as_of, lookback_days, **k):
+        return NewsBatch(items=[], pages=10, oldest_seen=self.oldest,
+                         reached_floor=False, raw=[])
+
+
+def test_상한에_걸린_회차도_덮은_구간의_실패_gap을_닫는다():
+    """**이것이 09-22 gap이 2주간 안 닫힌 이유다.**
+
+    gap을 실제로 메운 회차가 `reached_floor=0`이라는 이유로 공적을 인정받지 못했다.
+    게다가 그 회차가 이력에 남아 lookback 시계를 전진시키므로 이후 어떤 창에도
+    그 gap이 다시 안 들어온다 — 영원히 못 닫는다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        prior = NOW - timedelta(hours=8)
+        store.record_gap("KR", "naver", "005930", "VendorError: DNS 실패",
+                         NOW - timedelta(hours=5))
+        plan = Plan(_universe().get("KR", "005930"), "naver", 1, prior, True, "", 0.5)
+        # 상한에 걸렸지만 gap 시각(5시간 전)보다 과거인 9시간 전까지 닿았다
+        collect_one(store, _CapButCovered(NOW - timedelta(hours=9)), plan, NOW)
+        assert store.open_gaps() == []
+
+
+def test_직전_회차와_겹치면_영구_손실로_세지_않는다():
+    """lookback은 직전 회차가 이미 덮은 구간까지 **일부러** 파고든다.
+    거기 못 닿은 것은 못 받은 것이 아니다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        prior = NOW - timedelta(hours=8)
+        plan = Plan(_universe().get("KR", "005930"), "naver", 1, prior, True, "", 0.5)
+        batch, problem = collect_one(store, _CapButCovered(NOW - timedelta(hours=9)),
+                                     plan, NOW)
+        assert problem.startswith(PAGE_CAP_NOTE)      # 알리되
+        assert store.open_gaps() == []                # gap으로 세지 않는다
+
+
+def test_직전_회차에_못_닿으면_영구_손실이다():
+    """그 사이가 아무에게도 안 덮인 구간이다. 이건 진짜 손실이다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        prior = NOW - timedelta(hours=8)
+        plan = Plan(_universe().get("KR", "005930"), "naver", 1, prior, True, "", 0.5)
+        # 2시간 전까지만 닿았다 → 8시간 전 ~ 2시간 전이 빈다
+        batch, problem = collect_one(store, _CapButCovered(NOW - timedelta(hours=2)),
+                                     plan, NOW)
+        assert problem.startswith(COVERAGE_SHORTFALL)
+        assert len(store.open_gaps()) == 1
+
+
+def test_첫_수집은_비교할_직전_회차가_없으므로_손실로_본다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        plan = Plan(_universe().get("KR", "005930"), "naver", 1, None, True, "", 0.5)
+        _, problem = collect_one(store, _CapButCovered(NOW - timedelta(hours=2)),
+                                 plan, NOW)
+        assert problem.startswith(COVERAGE_SHORTFALL)
+        assert len(store.open_gaps()) == 1
+
+
+def test_백필은_reached_floor를_요구하지_않는다():
+    """증거는 `oldest_seen <= gap.at` 하나다. 상한에 걸린 회차도 구멍은 메운다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.record_gap("KR", "naver", "005930", "VendorError", NOW - timedelta(hours=5))
+        store.record_run("005930", "naver", ran_at=NOW,
+                         oldest_seen=NOW - timedelta(hours=9),
+                         reached_floor=False,          # 상한에 걸렸다
+                         pages=10, fetched=1000, inserted=0, duplicates=0)
+        rows = store.backfill_gap_resolution(exclude_prefix=COVERAGE_SHORTFALL, apply=True)
+        assert len(rows) == 1 and store.open_gaps() == []

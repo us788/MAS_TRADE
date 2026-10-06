@@ -24,7 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.collector import RunSummary, build_plan, collect_one
+from src.data.collector import (PAGE_CAP_NOTE, RunSummary, build_plan,
+                                collect_one)
 from src.data.storage import Store
 from src.data.universe import load_universe
 
@@ -156,8 +157,10 @@ def main() -> int:
         summary.succeeded += 1
         stored = store.news_for(plan.holding.symbol, now, plan.lookback_days)
         primary = len(batch.primary)
-        note = f"  ⚠ {problem[:50]}" if problem else ""
-        if problem:
+        note = f"  ⚠ {problem[:60]}" if problem else ""
+        # 페이지 상한 알림은 gap이 아니다 — 직전 회차와 겹쳐 손실이 없는 경우다.
+        # 세면 "영구 손실 N건"이 오염된다. 화면에만 띄운다.
+        if problem and not problem.startswith(PAGE_CAP_NOTE):
             summary.gaps.append(f"{plan.holding.name}: {problem}")
         print(f"  OK   {plan.holding.name:<18} 수집 {len(batch.items):>4} "
               f"(1차 {primary:>3}) 페이지 {batch.pages}{note}")

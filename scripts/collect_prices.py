@@ -128,6 +128,10 @@ def main() -> int:
                          "미완결 봉이 저장돼 정정이 거부된 경우에 쓴다")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--resolve-gaps", action="store_true",
+                    help="지금 봉이 덮고 있는 열린 gap을 닫는다 "
+                         "(무엇이 닫힐지만 보여준다)")
+    ap.add_argument("--apply", action="store_true", help="--resolve-gaps 실제 반영")
     ap.add_argument("--check-fresh", type=int, metavar="DAYS",
                     help="호출 없이 저장된 봉만 보고 종목 신선도를 판정한다. "
                          "미달이면 종료코드 1 (지수는 보지 않는다 — 이유는 check_fresh)")
@@ -138,6 +142,16 @@ def main() -> int:
         return show_status(store)
     if args.check_fresh is not None:
         return check_fresh(store, args.check_fresh)
+
+    if args.resolve_gaps:
+        rows = store.resolve_covered_gaps(apply=args.apply)
+        print(f"봉이 덮고 있는 gap {len(rows)}건" + (" — 닫았습니다" if args.apply else ""))
+        for g in rows[:10]:
+            print(f"  {g['symbol']} {g['from_date']}~{g['to_date']} — {g['reason'][:50]}")
+        print(f"남는 열린 gap {len(store.open_gaps()) - (0 if args.apply else len(rows))}건")
+        if rows and not args.apply:
+            print("\n--apply 를 붙이면 반영합니다.")
+        return 0
 
     markets = args.market or ["KR", "US"]
     today = date.today()
@@ -169,11 +183,16 @@ def main() -> int:
             continue
 
         r = store.upsert(bars, force=args.refetch)
+        # 받아온 구간이 덮는 그 종목의 열린 gap을 닫는다. 복구가 정상 경로라면
+        # **닫히는 것도 정상 경로**여야 한다 — 안 그러면 지표로 못 쓴다.
+        closed = len(store.resolve_covered_gaps(symbol, apply=True))
         note = ""
         if r.revised:
             note += f" 수정 {r.revised}"
         if r.conflicted:
             note += f" !!충돌 {r.conflicted}"
+        if closed:
+            note += f" gap해소 {closed}"
         print(f"  OK   {market} {label:<18s} 신규 {r.inserted:>4} "
               f"유지 {r.unchanged:>4}{note}")
         ok += 1

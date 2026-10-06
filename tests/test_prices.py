@@ -277,3 +277,61 @@ def test_force가_없으면_그대로_보류한다():
         s.upsert([_bar("005930", date(2026, 9, 16), 253250)])
         r = s.upsert([_bar("005930", date(2026, 9, 16), 253500)])
         assert r.conflicted == 1 and r.revised == 0
+
+
+# ---- 가격 gap 자동 해소 (2026-10-06) ----
+#
+# 그전까지 `resolve_gap`을 부르는 것이 테스트뿐이었다. 일시적 벤더 실패가 복구돼도
+# 기록은 영원히 열린 채라 `열린 gap N건`을 지표로 쓸 수 없었다.
+
+def test_봉이_덮고_있는_gap은_닫힌다():
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.record_gap("005930", date(2026, 9, 1), date(2026, 9, 30), "벤더 빈 응답")
+        s.upsert([_bar("005930", date(2026, 8, 31), 100),
+                  _bar("005930", date(2026, 10, 1), 101)])
+        rows = s.resolve_covered_gaps(apply=True)
+        assert len(rows) == 1 and s.open_gaps() == []
+
+
+def test_apply_없이는_닫지_않는다():
+    """파괴적 동작은 명시적으로만."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.record_gap("005930", date(2026, 9, 1), date(2026, 9, 30), "벤더 빈 응답")
+        s.upsert([_bar("005930", date(2026, 8, 31), 100),
+                  _bar("005930", date(2026, 10, 1), 101)])
+        assert len(s.resolve_covered_gaps()) == 1
+        assert len(s.open_gaps()) == 1
+
+
+def test_구간을_다_못_덮으면_남긴다():
+    """끝까지 못 받아온 상태는 복구가 아니다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.record_gap("005930", date(2026, 9, 1), date(2026, 9, 30), "벤더 빈 응답")
+        s.upsert([_bar("005930", date(2026, 8, 31), 100),
+                  _bar("005930", date(2026, 9, 15), 101)])   # 9/30에 못 미친다
+        assert s.resolve_covered_gaps(apply=True) == []
+        assert len(s.open_gaps()) == 1
+
+
+def test_공휴일_결측은_해소를_막지_않는다():
+    """결측평일을 조건에 넣으면 공휴일 때문에 어떤 gap도 안 닫힌다 (KR 3년에 57일)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.record_gap("005930", date(2026, 9, 14), date(2026, 9, 18), "벤더 빈 응답")
+        s.upsert([_bar("005930", date(2026, 9, 14), 100),
+                  _bar("005930", date(2026, 9, 18), 101)])   # 사이 평일 3일이 빈다
+        assert s.missing_weekdays("005930")                  # 결측은 실제로 있고
+        assert len(s.resolve_covered_gaps(apply=True)) == 1   # 그래도 닫힌다
+
+
+def test_다른_종목의_gap은_건드리지_않는다():
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.record_gap("000660", date(2026, 9, 1), date(2026, 9, 30), "벤더 빈 응답")
+        s.upsert([_bar("005930", date(2026, 8, 31), 100),
+                  _bar("005930", date(2026, 10, 1), 101)])
+        assert s.resolve_covered_gaps(symbol="005930", apply=True) == []
+        assert len(s.open_gaps()) == 1
