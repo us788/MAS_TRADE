@@ -47,10 +47,38 @@ log() {
 }
 
 # DarkWake 직후에는 DNS가 아직 안 붙어 있다 (2026-09-17 장애). 최대 30초 기다린다.
+#
+# **탐색 시간은 외부에서 끊는다** (2026-10-07 장애).
+# `nslookup -timeout=3`은 **DNS 응답 대기만** 제한하고 총 실행시간은 제한하지 않는다.
+# 베이스라인 래퍼에서 실제로 터졌다 — 09-30에 뜬 nslookup이 7일째 안 끝났고,
+# launchd는 그 작업을 state=running으로 보므로 새 인스턴스를 띄우지 않았다.
+# macOS에는 timeout(1)이 없으므로 직접 끊는다.
+# DNS 탐색 한 번에 허용하는 벽시계 시간. `nslookup -timeout=`으로는 못 끊는다.
+DNS_PROBE_SECONDS=20
+# 래퍼 전체 상한.
+WRAPPER_MAX_SECONDS=1800
+
+probe_dns() {
+    local host="$1" pid i
+    /usr/bin/nslookup -timeout=3 "$host" >/dev/null 2>&1 &
+    pid=$!
+    for (( i = 0; i < DNS_PROBE_SECONDS; i++ )); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid"
+            return $?
+        fi
+        sleep 1
+    done
+    log "WARN  nslookup이 ${DNS_PROBE_SECONDS}초를 넘겼다 — 죽인다 (pid $pid)"
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 1
+}
+
 wait_for_dns() {
     local host="$1" i
-    for i in 1 2 3 4 5 6; do
-        /usr/bin/nslookup -timeout=3 "$host" >/dev/null 2>&1 && return 0
+    for i in 1 2 3; do
+        probe_dns "$host" && return 0
         sleep 5
     done
     return 1
@@ -62,6 +90,37 @@ if [ ! -x "$PYTHON" ]; then
     log "FAIL  venv python이 없다: $PYTHON"
     exit 1
 fi
+
+# **스스로에게 상한을 건다** (2026-10-07). 멈춘 래퍼 하나가 launchd 슬롯을 물고
+# 있으면 그 작업은 다시 뜨지 못한다. 이 래퍼에는 락이 없으므로 워치독이 유일한
+# 보호 장치다.
+watchdog() {
+    sleep "$WRAPPER_MAX_SECONDS"
+    log "ABORT ${WRAPPER_MAX_SECONDS}초를 넘겼다 — 스스로 끊는다"
+    log "      멈춘 래퍼가 launchd 슬롯을 물고 있으면 그 작업은 다시 뜨지 못한다"
+    # **그룹째 끊는다.** 래퍼만 죽이면 python·caffeinate가 고아로 살아남고,
+    # `pkill -P $$`는 자기 자신(이 서브셸)도 자식이라 먼저 죽어버린다.
+    # launchd가 띄우면 래퍼가 프로세스 그룹 리더다(2026-10-07 실측: PGID == PID).
+    if [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" = "$$" ]; then
+        kill -9 -- "-$$" 2>/dev/null
+    else
+        # 손으로 돌린 경우엔 그룹 리더가 아니다. 트리를 직접 훑는다 —
+        # 래퍼만 죽이면 자식이 고아로 살아남는 것을 실측했다.
+        kill_tree "$$"
+    fi
+}
+
+kill_tree() {
+    local pid="$1" kid
+    for kid in $(pgrep -P "$pid" 2>/dev/null); do
+        [ "$kid" = "${BASHPID:-0}" ] && continue
+        kill_tree "$kid"
+    done
+    kill -9 "$pid" 2>/dev/null
+}
+watchdog &
+WATCHDOG=$!
+trap 'kill "$WATCHDOG" 2>/dev/null' EXIT
 
 if ! wait_for_dns "query1.finance.yahoo.com"; then
     log "SKIP  DNS가 준비되지 않았다 — 다음 발화에서 다시 받는다 (가격은 영구 손실이 아니다)"

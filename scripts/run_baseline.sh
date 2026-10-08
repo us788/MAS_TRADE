@@ -25,6 +25,11 @@ LOG_KEEP=3
 DISK_ABORT_GB=1
 # LLM 호출이 30건 × 최대 수십 초라 한 판이 30분을 넘을 수 있다. 수집보다 길게 잡는다.
 LOCK_STALE_SECONDS=7200
+# DNS 탐색 한 번에 허용하는 벽시계 시간. `nslookup -timeout=`으로는 못 끊는다(아래).
+DNS_PROBE_SECONDS=20
+# 래퍼 전체 상한. 정상 회차는 가격 수집 + LLM 30건이라 1시간 안쪽이다.
+# 어느 단계든 멈추면 launchd가 이 작업을 영원히 running으로 보므로 스스로 끊는다.
+WRAPPER_MAX_SECONDS=10800
 # 기준가가 이보다 묵으면 시그널을 내지 않는다. 주말(2일)에 연휴가 붙는 경우를 감안한 값.
 PRICE_MAX_AGE_DAYS=5
 
@@ -70,10 +75,34 @@ acquire_lock() {
 # 최대 30초까지 기다렸다가 그래도 안 되면 조용히 건너뛴다. 건너뛰면 이번 회차
 # 수집 기록이 남지 않으므로 **다음 회차의 lookback이 자동으로 늘어 구멍을 메운다** —
 # 실패로 기록하는 것보다 깨끗하다.
+#
+# **탐색 시간은 외부에서 끊는다** (2026-10-07 장애).
+# `nslookup -timeout=3`은 **DNS 응답 대기만** 제한하고 총 실행시간은 제한하지 않는다.
+# 09-30 17:51에 뜬 nslookup이 7일째 안 끝났고, launchd는 그 작업을 state=running으로
+# 보므로 새 인스턴스를 띄우지 않았다 — **주간 베이스라인이 한 주 통째로 죽었다.**
+# 2시간 stale 락 회수는 새 프로세스가 떠야 도는 로직이라 영원히 돌지 않았다.
+# macOS에는 timeout(1)이 없으므로 직접 끊는다.
+probe_dns() {
+    local host="$1" pid i
+    /usr/bin/nslookup -timeout=3 "$host" >/dev/null 2>&1 &
+    pid=$!
+    for (( i = 0; i < DNS_PROBE_SECONDS; i++ )); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid"
+            return $?
+        fi
+        sleep 1
+    done
+    log "WARN  nslookup이 ${DNS_PROBE_SECONDS}초를 넘겼다 — 죽인다 (pid $pid)"
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 1
+}
+
 wait_for_dns() {
     local host="$1" i
-    for i in 1 2 3 4 5 6; do
-        /usr/bin/nslookup -timeout=3 "$host" >/dev/null 2>&1 && return 0
+    for i in 1 2 3; do
+        probe_dns "$host" && return 0
         sleep 5
     done
     return 1
@@ -101,7 +130,37 @@ if ! acquire_lock; then
     log "SKIP  이전 실행이 아직 돌고 있다"
     exit 0
 fi
-trap 'rm -rf "$LOCK"' EXIT
+
+# **스스로에게 상한을 건다.** 멈춘 래퍼 하나가 launchd 슬롯을 물고 있으면
+# 그 작업은 다시 뜨지 못한다 — 주 1회 작업에서는 한 주를 잃는 것이다.
+# SIGKILL이라 EXIT 트랩이 안 돌고 락이 남지만, 그건 다음 회차가 stale로 회수한다.
+watchdog() {
+    sleep "$WRAPPER_MAX_SECONDS"
+    log "ABORT ${WRAPPER_MAX_SECONDS}초를 넘겼다 — 스스로 끊는다"
+    log "      멈춘 래퍼가 launchd 슬롯을 물고 있으면 그 작업은 다시 뜨지 못한다"
+    # **그룹째 끊는다.** 래퍼만 죽이면 python·caffeinate가 고아로 살아남고,
+    # `pkill -P $$`는 자기 자신(이 서브셸)도 자식이라 먼저 죽어버린다.
+    # launchd가 띄우면 래퍼가 프로세스 그룹 리더다(2026-10-07 실측: PGID == PID).
+    if [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" = "$$" ]; then
+        kill -9 -- "-$$" 2>/dev/null
+    else
+        # 손으로 돌린 경우엔 그룹 리더가 아니다. 트리를 직접 훑는다 —
+        # 래퍼만 죽이면 자식이 고아로 살아남는 것을 실측했다.
+        kill_tree "$$"
+    fi
+}
+
+kill_tree() {
+    local pid="$1" kid
+    for kid in $(pgrep -P "$pid" 2>/dev/null); do
+        [ "$kid" = "${BASHPID:-0}" ] && continue
+        kill_tree "$kid"
+    done
+    kill -9 "$pid" 2>/dev/null
+}
+watchdog &
+WATCHDOG=$!
+trap 'rm -rf "$LOCK"; kill "$WATCHDOG" 2>/dev/null' EXIT
 
 if ! wait_for_dns "api.deepseek.com"; then
     log "SKIP  DNS가 준비되지 않았다 (api.deepseek.com) — 이번 회차를 건너뛴다"

@@ -38,7 +38,34 @@ KR_MARKET = (9, 16)
 # 수집 주기의 몇 배까지 봐주는가. 1배는 정상 흔들림에도 걸린다.
 STALE_FACTOR = 2.5
 BASELINE_MAX_DAYS = 8          # 주 1회 + 하루 여유
+# launchd 작업이 이보다 오래 떠 있으면 멈춘 것으로 본다. 가장 긴 베이스라인도
+# 정상 회차는 1시간 안쪽이다(09-30 실측 KR 59분 + US 10분).
+STUCK_JOB_SECONDS = 4 * 3600
 DISK_WARN_GB, DISK_CRIT_GB = 10, 3
+
+
+def _etime_seconds(text):
+    """`ps -o etime`의 경과 시간을 초로. `MM:SS` · `HH:MM:SS` · `DD-HH:MM:SS`.
+
+    macOS ps에는 `etimes`(초 단위) 키워드가 없다 — 직접 파싱한다.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    days = 0
+    if "-" in text:
+        head, text = text.split("-", 1)
+        days = int(head)
+    try:
+        parts = [int(x) for x in text.split(":")]
+    except ValueError:
+        return None
+    if not 1 <= len(parts) <= 3:
+        return None
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts
+    return days * 86400 + h * 3600 + m * 60 + sec
 
 
 def _check(name, state, detail):
@@ -83,7 +110,17 @@ def check_market_hours_holes(store, now):
         seen[(k.date(), k.hour)] += 1
 
     holes = []
-    cur = (now - timedelta(hours=24)).astimezone(KST)
+    # **창에 반만 걸친 시간도 판정하지 않는다** (2026-10-07).
+    # `seen`은 24시간 창 **안의** 회차만 센다. 창이 10:29에 시작하면 그 시간대의
+    # 수집이 10:19에 있었어도 10분 차이로 밖이라, 10시가 통째로 빈 것으로 보인다.
+    # 실제로 같은 데이터가 21:19 점검에서는 `09시·11시 (연속 1, 경고)`였는데
+    # 다음날 10:29 점검에서는 `10시·11시 (연속 2, 심각)`이 됐다 —
+    # **데이터는 그대로인데 창이 미끄러져 경고가 심각으로 바뀌었다.**
+    # 뒤쪽 경계(`end`)는 09-28에 막았는데 앞쪽은 그대로였다. 같은 실수의 반대편이다.
+    start = (now - timedelta(hours=24)).astimezone(KST)
+    cur = start.replace(minute=0, second=0, microsecond=0)
+    if cur < start:
+        cur += timedelta(hours=1)      # 반만 걸친 첫 시간은 건너뛴다
     # **진행 중인 시간은 판정하지 않는다** (2026-09-28). 수집기는 종목별 주기를 보고
     # "아직 안 됐다"면 회차 기록을 남기지 않는다. 14:11에 점검하면 13:18에 다 받아둔
     # 상태여도 14시가 빈 것으로 보인다 — 매일 거짓 경보가 뜨면 진짜 구멍을 흘려보낸다.
@@ -134,7 +171,10 @@ def check_baseline(signal_store, now):
     if not row or not row["t"]:
         return _check("베이스라인", WARN, "실행 기록이 없다")
     days = (now - datetime.fromisoformat(row["t"])).total_seconds() / 86400
-    state = WARN if days > BASELINE_MAX_DAYS else OK
+    # **심각이다** (2026-10-07 정정). 경고로 두었더니 주간 베이스라인이 한 주
+    # 통째로 죽은 것을 아무도 안 봤다. 놓친 주의 표본은 되살릴 수 없다 —
+    # as_of가 고정 요일에 묶여 있어 다음 주에 두 번 낼 수 없다.
+    state = CRIT if days > BASELINE_MAX_DAYS else OK
     return _check("베이스라인", state,
                   f"마지막 실행 {days:.1f}일 전 (누적 {row['n']}회)")
 
@@ -188,21 +228,46 @@ def check_disk(repo):
 
 
 def check_scheduler(repo):
-    """launchd 작업이 등록돼 있고 마지막 종료 코드가 0인가."""
-    results = []
+    """launchd 작업이 등록돼 있고, 종료 코드가 0이고, **멈춰 있지 않은가.**
+
+    **종료코드 0은 "지금 잘 돌고 있다"가 아니다** (2026-10-07에 배웠다).
+    09-30 성공 직후 잉여 발화가 하나 더 떴고 그것이 `nslookup`에서 멈췄다.
+    launchd는 그 작업을 `state = running`으로 보므로 **새 인스턴스를 띄우지 않는다** —
+    주간 베이스라인이 한 주 통째로 죽었다. 그런데 `last exit code`는 **이전**
+    인스턴스가 남긴 0이라 이 점검은 끝까지 "모두 정상"이라고 말했다.
+
+    그래서 지금 떠 있는 프로세스가 **얼마나 오래 떠 있는지**를 따로 본다.
+    """
+    stuck, problems = [], []
     for job in ("collect", "prices", "baseline"):
         label = f"com.ys.mastrade.{job}"
         out = subprocess.run(["launchctl", "print", f"gui/{__import__('os').getuid()}/{label}"],
                              capture_output=True, text=True)
         if out.returncode != 0:
-            results.append(f"{job} 미등록"); continue
-        code = next((l.split("=")[1].strip() for l in out.stdout.splitlines()
-                     if "last exit code" in l), "?")
-        if code not in ("0", "(never exited)"):
-            results.append(f"{job} 종료코드 {code}")
-    if not results:
-        return _check("스케줄러", OK, "collect · prices · baseline 모두 정상")
-    return _check("스케줄러", WARN, " · ".join(results))
+            problems.append(f"{job} 미등록"); continue
+
+        field = lambda key: next(
+            (l.split("=", 1)[1].strip() for l in out.stdout.splitlines()
+             if l.strip().startswith(key)), "")
+        code = field("last exit code")
+        pid = field("pid")
+
+        if pid.isdigit():
+            ps = subprocess.run(["ps", "-o", "etime=", "-p", pid],
+                                capture_output=True, text=True)
+            secs = _etime_seconds(ps.stdout) if ps.returncode == 0 else None
+            if secs is not None and secs > STUCK_JOB_SECONDS:
+                stuck.append(f"{job} {secs // 3600}시간째 실행 중 (pid {pid}) — 멈춘 듯하다")
+        # **실행 중인 작업에는 `last exit code`가 아직 없다.** 그걸 "?"로 읽어
+        # 문제로 세면 정상 실행 중에 매번 경고가 뜬다 (2026-10-07 실측).
+        if code and code not in ("0", "(never exited)"):
+            problems.append(f"{job} 종료코드 {code}")
+
+    if stuck:
+        return _check("스케줄러", CRIT, " · ".join(stuck + problems))
+    if problems:
+        return _check("스케줄러", WARN, " · ".join(problems))
+    return _check("스케줄러", OK, "collect · prices · baseline 모두 정상")
 
 
 def main() -> int:
