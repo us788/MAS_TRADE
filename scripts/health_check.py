@@ -270,6 +270,23 @@ def check_scheduler(repo):
     return _check("스케줄러", OK, "collect · prices · baseline 모두 정상")
 
 
+def _notification_script(body, worst):
+    """osascript에 넘길 AppleScript 한 줄.
+
+    **`ensure_ascii=False`가 핵심이다** (2026-10-15). 기본값은 한글을 `\\uXXXX`로
+    이스케이프하는데 **AppleScript는 `\\u`를 모른다** — 알림이 통째로 실패한다.
+    점검 항목 이름이 전부 한글이므로 **이상이 있을 때마다 100% 실패했다.**
+
+    2026-09-17부터 22번 전부 이렇게 죽었고, 에러는 로그에만 남아 아무도 못 봤다.
+    조용히 죽는 것을 잡으려고 만든 장치가 조용히 죽어 있었다.
+
+        23:24: syntax error: "\"" 을 예상했지만 알 수 없는 토큰을 발견했습니다. (-2741)
+                ^ `display notification "` 바로 뒤, `\\u`가 시작되는 자리다
+    """
+    return (f'display notification {json.dumps(body, ensure_ascii=False)} '
+            f'with title "MAS_TRADE 점검: {worst}"')
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="파이프라인 일일 점검")
     ap.add_argument("--json", action="store_true")
@@ -304,9 +321,8 @@ def main() -> int:
     if args.notify and worst != OK:
         bad = [c for c in checks if c["state"] != OK]
         body = " / ".join(f"{c['name']}: {c['detail'][:60]}" for c in bad[:3])
-        subprocess.run(["osascript", "-e",
-                        f'display notification {json.dumps(body)} '
-                        f'with title "MAS_TRADE 점검: {worst}"'], check=False)
+        subprocess.run(["osascript", "-e", _notification_script(body, worst)],
+                       check=False)
     return RANK[worst]
 
 

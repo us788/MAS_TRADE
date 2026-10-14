@@ -169,3 +169,25 @@ def test_온전히_들어온_시간의_구멍은_그대로_잡는다():
         r = hc.check_market_hours_holes(s, now)
         assert r["state"] == hc.CRIT                                # 연속 2 = 심각
         assert "10시" in r["detail"] and "11시" in r["detail"]
+
+
+# ---- macOS 알림 (2026-10-15) ----
+#
+# 조용히 죽는 것을 잡으려고 만든 장치가 2026-09-17부터 조용히 죽어 있었다.
+# 22번 전부 실패했고 에러는 health.log에만 남았다.
+
+def test_알림에_유니코드_이스케이프를_넣지_않는다():
+    """`json.dumps` 기본값은 한글을 `\\uXXXX`로 바꾸는데 **AppleScript는 `\\u`를 모른다.**
+    점검 항목 이름이 전부 한글이라 이상이 있을 때마다 100% 실패했다.
+    """
+    script = hc._notification_script("한국 장중 커버리지: 3시간 비어 있다", hc.WARN)
+    assert "\\u" not in script                      # 이스케이프가 없어야 하고
+    assert "한국 장중 커버리지" in script              # 한글이 그대로 들어가야 한다
+
+
+def test_알림이_따옴표를_이스케이프한다():
+    """본문에 따옴표가 섞여도 AppleScript 문자열이 깨지면 안 된다."""
+    script = hc._notification_script('벤더가 "빈 응답"을 줬다', hc.CRIT)
+    assert '\\"' in script
+    assert script.startswith("display notification ")
+    assert script.endswith(f'with title "MAS_TRADE 점검: {hc.CRIT}"')
