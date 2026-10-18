@@ -240,7 +240,14 @@ def proportion_ci(successes: int, n: int, confidence: float = 0.95
     denom = 1 + z ** 2 / n
     center = (p + z ** 2 / (2 * n)) / denom
     half = z / denom * math.sqrt(p * (1 - p) / n + z ** 2 / (4 * n ** 2))
-    return (max(0.0, center - half), min(1.0, center + half))
+    # **경계는 해석적으로 정확히 0·1이다.** successes가 0이면 center == half라
+    # 하한이 0이어야 하는데, 부동소수점으로 빼면 2.8e-17 같은 잔차가 남는다.
+    # `max(0.0, ...)`는 음수만 자르므로 그 잔차가 통과하고, 남느냐 마느냐가
+    # 파이썬 버전·플랫폼에 따라 갈린다 — 같은 코드가 환경에 따라 다른 값을 낸다.
+    # 09-28에 `sd == 0` 가드가 1.7e-17을 통과시킨 것과 같은 구조다.
+    lo = 0.0 if successes == 0 else max(0.0, center - half)
+    hi = 1.0 if successes == n else min(1.0, center + half)
+    return (lo, hi)
 
 
 def mean_ci(values: Sequence[float | None], confidence: float = 0.95
