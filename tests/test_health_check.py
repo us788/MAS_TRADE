@@ -191,3 +191,45 @@ def test_알림이_따옴표를_이스케이프한다():
     assert '\\"' in script
     assert script.startswith("display notification ")
     assert script.endswith(f'with title "MAS_TRADE 점검: {hc.CRIT}"')
+
+
+# ---- 멈춤 판정은 진행 흔적으로 한다 (2026-11-05) ----
+#
+# 벽시계로는 진짜 멈춤과 자다 깬 정상 회차가 같은 축에 있다.
+# 임계값을 어디 두든 한쪽이 틀린다 — 실측 셋이 그걸 보여준다.
+
+HOUR = 3600
+
+
+def test_오래_떠_있어도_방금_진행했으면_멈춘_게_아니다():
+    """2026-11-04 실측. 벽시계 9시간 49분인데 최근 1시간에 LLM 호출 25건이었다.
+    예전 규칙(벽시계 4시간)은 이걸 심각으로 올려 거짓 경보를 냈다.
+    """
+    assert hc._stuck_verdict(9 * HOUR + 49 * 60, idle_seconds=141) is False
+
+
+def test_자다_깬_정상_회차도_멈춘_게_아니다():
+    """2026-10-14 실측. 벽시계 7시간 51분, 그래도 진행 중이었다."""
+    assert hc._stuck_verdict(7 * HOUR + 51 * 60, idle_seconds=5 * 60) is False
+
+
+def test_진짜_멈춤은_그대로_잡는다():
+    """2026-10-07 실측. nslookup이 7일째 안 끝나 주간 베이스라인이 한 주 죽었다.
+    느슨하게 만든 대가로 이걸 놓치면 안 된다.
+    """
+    assert hc._stuck_verdict(7 * 24 * HOUR, idle_seconds=7 * 24 * HOUR) is True
+
+
+def test_진행_흔적이_없으면_보수적으로_멈춤으로_본다():
+    """흔적이 아예 없는 작업(prices)은 벽시계로 판단할 수밖에 없다."""
+    assert hc._stuck_verdict(5 * HOUR, idle_seconds=None) is True
+
+
+def test_짧게_떠_있으면_진행과_무관하게_정상이다():
+    assert hc._stuck_verdict(HOUR, idle_seconds=None) is False
+    assert hc._stuck_verdict(None, idle_seconds=None) is False
+
+
+def test_무진행_기준이_정상_회차_간격보다_넉넉하다():
+    """LLM 호출 간격이 수십 초~수 분이다. 기준이 너무 빡빡하면 또 거짓 경보가 난다."""
+    assert hc.NO_PROGRESS_SECONDS >= 15 * 60

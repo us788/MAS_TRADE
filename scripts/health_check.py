@@ -41,7 +41,49 @@ BASELINE_MAX_DAYS = 8          # 주 1회 + 하루 여유
 # launchd 작업이 이보다 오래 떠 있으면 멈춘 것으로 본다. 가장 긴 베이스라인도
 # 정상 회차는 1시간 안쪽이다(09-30 실측 KR 59분 + US 10분).
 STUCK_JOB_SECONDS = 4 * 3600
+# 그 시간 넘게 **아무 진행이 없으면** 멈춘 것으로 본다. 벽시계만으로는 가를 수 없다(아래).
+NO_PROGRESS_SECONDS = 30 * 60
+# 작업별 "뭔가 해냈다"는 흔적. 이 테이블들은 해당 작업만 쓴다.
+PROGRESS_SQL = {
+    "baseline": "SELECT MAX(called_at) FROM llm_calls",
+    "collect": "SELECT MAX(ran_at) FROM collection_runs",
+}
 DISK_WARN_GB, DISK_CRIT_GB = 10, 3
+
+
+def _stuck_verdict(elapsed_seconds, idle_seconds):
+    """멈춤 판정. **"얼마나 오래 떠 있나"가 아니라 "얼마나 오래 아무것도 안 했나"다.**
+
+    2026-11-04에 이 점검이 거짓 심각을 냈다. 주간 베이스라인이 벽시계로 9시간 49분째
+    돌고 있었는데, 같은 순간 **최근 1시간에 LLM 호출 25건**을 하고 있었다. 노트북이
+    자는 동안 프로세스가 얼어 있었을 뿐이다.
+
+    벽시계로는 가를 수 없다 — 진짜 멈춤(10-07, 7일)과 자다 깬 정상 회차(10-14 7시간
+    51분, 11-04 9시간 49분)가 같은 축에 있다. 임계값을 어디 두든 한쪽이 틀린다.
+
+    **진행 흔적을 본다.** 오래 떠 있어도 방금 뭔가 했으면 멈춘 게 아니고,
+    흔적이 아예 없으면(`idle_seconds is None`) 보수적으로 멈춘 것으로 본다.
+    """
+    if elapsed_seconds is None or elapsed_seconds <= STUCK_JOB_SECONDS:
+        return False
+    if idle_seconds is None:
+        return True
+    return idle_seconds > NO_PROGRESS_SECONDS
+
+
+def _last_progress(store, job, now):
+    """그 작업이 마지막으로 뭔가 해낸 뒤 흐른 초. 신호가 없으면 None."""
+    sql = PROGRESS_SQL.get(job)
+    if not sql:
+        return None
+    try:
+        with store.connect() as conn:
+            row = conn.execute(sql).fetchone()
+    except Exception:                                      # noqa: BLE001
+        return None
+    if not row or not row[0]:
+        return None
+    return (now - datetime.fromisoformat(row[0])).total_seconds()
 
 
 def _etime_seconds(text):
@@ -227,7 +269,7 @@ def check_disk(repo):
     return _check("디스크", state, f"여유 {free}GB")
 
 
-def check_scheduler(repo):
+def check_scheduler(repo, store=None, now=None):
     """launchd 작업이 등록돼 있고, 종료 코드가 0이고, **멈춰 있지 않은가.**
 
     **종료코드 0은 "지금 잘 돌고 있다"가 아니다** (2026-10-07에 배웠다).
@@ -236,8 +278,11 @@ def check_scheduler(repo):
     주간 베이스라인이 한 주 통째로 죽었다. 그런데 `last exit code`는 **이전**
     인스턴스가 남긴 0이라 이 점검은 끝까지 "모두 정상"이라고 말했다.
 
-    그래서 지금 떠 있는 프로세스가 **얼마나 오래 떠 있는지**를 따로 본다.
+    그래서 지금 떠 있는 프로세스를 따로 본다 — **떠 있은 시간이 아니라 진행 흔적으로**
+    판정한다. 벽시계만 보면 자다 깬 정상 회차를 멈춘 것으로 센다(11-04 실측).
+    근거는 `_stuck_verdict`.
     """
+    now = now or datetime.now(UTC)
     stuck, problems = [], []
     for job in ("collect", "prices", "baseline"):
         label = f"com.ys.mastrade.{job}"
@@ -256,8 +301,11 @@ def check_scheduler(repo):
             ps = subprocess.run(["ps", "-o", "etime=", "-p", pid],
                                 capture_output=True, text=True)
             secs = _etime_seconds(ps.stdout) if ps.returncode == 0 else None
-            if secs is not None and secs > STUCK_JOB_SECONDS:
-                stuck.append(f"{job} {secs // 3600}시간째 실행 중 (pid {pid}) — 멈춘 듯하다")
+            idle = _last_progress(store, job, now) if store is not None else None
+            if _stuck_verdict(secs, idle):
+                tail = (f"마지막 진행 {idle // 60:.0f}분 전" if idle is not None
+                        else "진행 흔적 없음")
+                stuck.append(f"{job} {secs // 3600}시간째 실행 중 (pid {pid}) — {tail}")
         # **실행 중인 작업에는 `last exit code`가 아직 없다.** 그걸 "?"로 읽어
         # 문제로 세면 정상 실행 중에 매번 경고가 뜬다 (2026-10-07 실측).
         if code and code not in ("0", "(never exited)"):
@@ -304,7 +352,7 @@ def main() -> int:
         check_prices(price_store, now),
         check_benchmark(price_store),
         check_baseline(signal_store, now),
-        check_scheduler(repo),
+        check_scheduler(repo, store, now),
         check_disk(repo),
     ]
     worst = max(checks, key=lambda c: RANK[c["state"]])["state"]
