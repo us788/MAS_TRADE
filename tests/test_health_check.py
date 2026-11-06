@@ -91,24 +91,70 @@ def test_장_밖의_빈_시간은_문제가_아니다():
         assert hc.check_market_hours_holes(s, NOW)["state"] == hc.OK
 
 
-def test_커버리지_미달_gap은_심각으로_뜬다():
-    """영구 손실이므로 재수집 실패와 다르게 취급한다."""
+def test_새_영구_손실은_심각으로_뜬다():
+    """막 난 영구 손실은 재수집 실패와 다르게 취급한다."""
     with tempfile.TemporaryDirectory() as tmp:
         s = _store(tmp)
         s.record_gap("KR", "naver", "005930", "커버리지 미달: 10페이지로 ...", NOW)
-        assert hc.check_gaps(s)["state"] == hc.CRIT
+        r = hc.check_gaps(s, NOW)
+        assert r["state"] == hc.CRIT and "새 영구 손실" in r["detail"]
 
 
 def test_수집_실패_gap만_있으면_경고다():
     with tempfile.TemporaryDirectory() as tmp:
         s = _store(tmp)
         s.record_gap("KR", "naver", "005930", "VendorError: DNS", NOW)
-        assert hc.check_gaps(s)["state"] == hc.WARN
+        assert hc.check_gaps(s, NOW)["state"] == hc.WARN
 
 
 def test_gap이_없으면_ok다():
     with tempfile.TemporaryDirectory() as tmp:
-        assert hc.check_gaps(_store(tmp))["state"] == hc.OK
+        assert hc.check_gaps(_store(tmp), NOW)["state"] == hc.OK
+
+
+# ---- 새 손실과 이미 아는 손실을 가른다 (2026-11-06) ----
+#
+# 커버리지 미달은 영구 손실이라 설계상 닫히지 않는다. 그래서 한 번 나면 매일 심각이
+# 되고, 그 안에서 새로 난 손실이 묻힌다 — 10-29·10-30의 두 건을 알아채는 데 엿새가
+# 걸렸다. 영구 손실에는 조치가 없으므로, 한 번 알렸으면 조용해지는 것이 맞다.
+
+def test_사흘_지난_영구_손실은_심각에서_내려온다():
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        s.record_gap("KR", "naver", "005930", "커버리지 미달: ...",
+                     NOW - timedelta(days=5))
+        r = hc.check_gaps(s, NOW)
+        assert r["state"] == hc.WARN
+        assert "되돌릴 수 없다" in r["detail"]
+
+
+def test_조용해져도_누적_건수는_계속_보인다():
+    """조용해지는 것과 잊히는 것은 다르다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        for d in (5, 9, 20):
+            s.record_gap("KR", "naver", "000270", "커버리지 미달: ...",
+                         NOW - timedelta(days=d))
+        r = hc.check_gaps(s, NOW)
+        assert r["state"] != hc.CRIT
+        assert "누적 3건" in r["detail"]
+
+
+def test_쌓인_것_사이에_새_손실이_섞이면_잡는다():
+    """**이 테스트가 이 변경의 이유다.** 10-17의 2건에 묻혀 10-29·10-30을 엿새 동안
+    못 봤다. 묵은 것이 아무리 많아도 새 것 하나면 심각이어야 한다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _store(tmp)
+        for d in (12, 13, 20, 25):
+            s.record_gap("KR", "naver", "000270", "커버리지 미달: ...",
+                         NOW - timedelta(days=d))
+        s.record_gap("KR", "naver", "000270", "커버리지 미달: ...",
+                     NOW - timedelta(hours=6))          # 오늘 난 것
+        r = hc.check_gaps(s, NOW)
+        assert r["state"] == hc.CRIT
+        assert "새 영구 손실 1건" in r["detail"]
+        assert "누적 5건" in r["detail"]
 
 
 # ---- 멈춘 작업 판정 (2026-10-07) ----

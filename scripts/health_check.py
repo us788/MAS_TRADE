@@ -43,6 +43,17 @@ BASELINE_MAX_DAYS = 8          # 주 1회 + 하루 여유
 STUCK_JOB_SECONDS = 4 * 3600
 # 그 시간 넘게 **아무 진행이 없으면** 멈춘 것으로 본다. 벽시계만으로는 가를 수 없다(아래).
 NO_PROGRESS_SECONDS = 30 * 60
+# 커버리지 미달 gap이 **새 것**으로 취급되는 기간(일).
+#
+# 이 종류는 영구 손실이라 **설계상 닫히지 않는다.** 그래서 한 번 나면 그 뒤로 매일
+# 심각이 되고, 쌓인 숫자 안에서 **새로 난 손실이 묻힌다** — 10-17에 2건이 난 뒤
+# 10-29·10-30에 2건이 더 났는데 알아채는 데 엿새가 걸렸다. 매일 울리는 심각은
+# 아무도 안 본다(2026-09-28).
+#
+# 영구 손실에는 **조치가 없다.** 경보의 일은 알리는 것뿐이고, 한 번 알렸으면 그 뒤로
+# 같은 것을 외치는 것은 잡음이다. **새로 난 것만 심각으로 올리고 누적은 늘 보여준다.**
+# 주말을 건너뛰어도 한 번은 보도록 3일로 둔다.
+NEW_LOSS_DAYS = 3
 # 작업별 "뭔가 해냈다"는 흔적. 이 테이블들은 해당 작업만 쓴다.
 PROGRESS_SQL = {
     "baseline": "SELECT MAX(called_at) FROM llm_calls",
@@ -192,18 +203,39 @@ def check_market_hours_holes(store, now):
                   f"{', '.join(holes[:8])} ({tail})")
 
 
-def check_gaps(store):
+def check_gaps(store, now=None):
+    """열린 gap. **새로 난 영구 손실만 심각으로 올린다** (근거는 `NEW_LOSS_DAYS`).
+
+    누적 건수는 상태가 무엇이든 항상 보여준다 — 조용해지는 것과 잊히는 것은 다르다.
+    """
+    now = now or datetime.now(UTC)
     gaps = store.open_gaps()
     if not gaps:
         return _check("열린 gap", OK, "없음")
+
     shortfall = [g for g in gaps if g["reason"].startswith("커버리지 미달")]
     failed = len(gaps) - len(shortfall)
+    fresh = [g for g in shortfall
+             if (now - datetime.fromisoformat(g["at"])).total_seconds() < NEW_LOSS_DAYS * 86400]
+
     parts = []
+    if fresh:
+        when = ", ".join(sorted({datetime.fromisoformat(g["at"]).astimezone(KST).strftime("%m-%d")
+                                 for g in fresh}))
+        parts.append(f"**새 영구 손실 {len(fresh)}건** ({when})")
     if shortfall:
-        parts.append(f"커버리지 미달 {len(shortfall)}건 (영구 손실)")
+        parts.append(f"커버리지 미달 누적 {len(shortfall)}건"
+                     + ("" if fresh else " — 전부 사흘 넘은 것, 되돌릴 수 없다"))
     if failed:
         parts.append(f"미복구 수집 실패 {failed}건")
-    return _check("열린 gap", CRIT if shortfall else WARN, " · ".join(parts))
+
+    if fresh:
+        state = CRIT
+    elif failed:
+        state = WARN
+    else:
+        state = WARN if shortfall else OK
+    return _check("열린 gap", state, " · ".join(parts))
 
 
 def check_baseline(signal_store, now):
@@ -348,7 +380,7 @@ def main() -> int:
     checks = [
         check_market_hours_holes(store, now),
         check_collection_freshness(store, now),
-        check_gaps(store),
+        check_gaps(store, now),
         check_prices(price_store, now),
         check_benchmark(price_store),
         check_baseline(signal_store, now),
