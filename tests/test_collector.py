@@ -8,7 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.data.collector import (
+    ADAPTIVE_WINDOW_HOURS,
+    COLLECT_TIERS,
     COVERAGE_SHORTFALL,
+    adaptive_interval_hours,
+    observed_rate_per_hour,
     DUE_SLACK,
     MAX_LOOKBACK_DAYS,
     MIN_LOOKBACK_HOURS,
@@ -325,3 +329,80 @@ def test_백필은_reached_floor를_요구하지_않는다():
                          pages=10, fetched=1000, inserted=0, duplicates=0)
         rows = store.backfill_gap_resolution(exclude_prefix=COVERAGE_SHORTFALL, apply=True)
         assert len(rows) == 1 and store.open_gaps() == []
+
+
+# ---- 적응형 수집 주기 (2026-11-14) ----
+#
+# 검색어로는 못 푼다 — 네이버에 제외 연산자가 없고 `+`는 재현율을 3.8~36%로 떨군다.
+# 고정 주기는 버스트에서 뚫린다. 그래서 수집기가 관측으로 스스로 좁힌다.
+
+
+def _capped(ran_at, oldest_seen, pages=10):
+    return {"ran_at": ran_at.isoformat(), "oldest_seen": oldest_seen.isoformat(),
+            "pages": pages}
+
+
+def test_상한_이력이_없으면_설정_주기_그대로():
+    assert adaptive_interval_hours(6, None, NOW) == (6, "")
+
+
+def test_버스트를_관측하면_주기를_좁힌다():
+    """2026-10-29 실측. 10페이지 1,000건이 2.07시간을 덮었다 = 484건/시간.
+    그 속도면 6시간 주기의 lookback(9시간)에 4,300건이 필요해 상한을 네 배 넘는다.
+    """
+    run = _capped(NOW, NOW - timedelta(hours=2.07))
+    rate = observed_rate_per_hour(run)
+    assert 470 < rate < 500
+    hours, why = adaptive_interval_hours(6, run, NOW)
+    assert hours == 1 and "좁힘" in why
+
+
+def test_설정보다_늘리지는_않는다():
+    """적응은 **좁히기만** 한다. 늘리면 사람이 정한 커버리지 의도를 뒤집는다."""
+    slow = _capped(NOW, NOW - timedelta(hours=40))        # 25건/시간
+    assert adaptive_interval_hours(6, slow, NOW)[0] == 6
+    assert adaptive_interval_hours(1, slow, NOW)[0] == 1
+
+
+def test_원본_건수로_센다():
+    """저장된 `fetched`는 제외 규칙을 통과한 뒤다. 예산을 태우는 건 버려진 기사까지
+    포함한 원본이라 `pages × 100`으로 센다 — 10-29에 1,000건 중 38건만 남았다.
+    """
+    run = _capped(NOW, NOW - timedelta(hours=10), pages=10)
+    assert observed_rate_per_hour(run) == 100.0          # 1,000건 / 10시간
+
+
+def test_근거가_모자라면_설정값으로_돌아간다():
+    assert observed_rate_per_hour({"ran_at": NOW.isoformat(), "oldest_seen": None,
+                                   "pages": 10}) is None
+    assert observed_rate_per_hour(_capped(NOW, NOW, pages=10)) is None      # span 0
+    assert observed_rate_per_hour(_capped(NOW, NOW - timedelta(hours=2), 0)) is None
+
+
+def test_좁힌_주기는_등급_중_하나다():
+    for hours in (1, 2, 5, 40):
+        run = _capped(NOW, NOW - timedelta(hours=hours))
+        assert adaptive_interval_hours(24, run, NOW)[0] in COLLECT_TIERS
+
+
+def test_상한_이력은_48시간만_본다():
+    """지나면 설정 주기로 **저절로** 돌아간다 — 되돌리기를 사람 기억에 맡기지 않는다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        old = NOW - timedelta(hours=ADAPTIVE_WINDOW_HOURS + 5)
+        store.record_run("005930", "naver", ran_at=old,
+                         oldest_seen=old - timedelta(hours=2), reached_floor=False,
+                         pages=10, fetched=50, inserted=50, duplicates=0)
+        since = NOW - timedelta(hours=ADAPTIVE_WINDOW_HOURS)
+        assert store.last_capped_run("005930", "naver", since) is None
+
+
+def test_build_plan이_좁힌_주기를_쓴다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _store(tmp)
+        store.record_run("105560", "naver", ran_at=NOW - timedelta(hours=3),
+                         oldest_seen=NOW - timedelta(hours=5), reached_floor=False,
+                         pages=10, fetched=40, inserted=40, duplicates=0)
+        plan = _plans(store)["105560"]                   # 설정은 24h
+        assert plan.interval_hours == 1
+        assert "좁힘" in plan.reason

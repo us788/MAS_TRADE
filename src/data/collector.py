@@ -33,6 +33,29 @@ MIN_LOOKBACK_HOURS = 1.0
 MAX_LOOKBACK_DAYS = 7.0
 """장기 중단 뒤 무한정 거슬러 올라가지 않게 막는다. 어차피 벤더가 안 준다."""
 
+# ---- 적응형 수집 주기 (2026-11-14) ----
+#
+# **왜 필요한가.** 유입 속도는 종목·시점에 따라 10~100배로 흔들린다(실측). 기아는
+# 평상시 10~35건/시간인데 KBO 포스트시즌에 483건/시간까지 갔다 — 사명이 구단
+# 브랜드어와 같아 검색이 야구 기사로 덮인다. 고정 주기는 그 버스트에서 뚫리고
+# (10-17~10-30에 영구 손실 9.2시간), 버스트에 맞추면 평상시에 과잉이다.
+#
+# **왜 검색어로 못 푸는가.** 네이버는 `-`·`!`·`NOT` 제외 연산자를 지원하지 않는다
+# (실측: `기아 -타이거즈`는 야구 비율이 76% → 100%로 **올라간다**). `+`(AND)는 되지만
+# 라이브 색인 대비 재현율이 **3.8~36%**다 — 야구 20%를 막으려고 회사 기사 90%를
+# 버리는 거래다. 근거는 `docs/journal/2026-11-14.md`.
+#
+# 그래서 **수집기가 스스로 조절한다.** 신호는 이미 있다 — 상한에 걸린 회차가
+# `reached_floor=0`으로 남고, 그 회차의 `pages`와 `oldest_seen`이 **버스트가 오는
+# 순간의 유입 속도**를 알려준다. 한 시점에 재는 `measure_news_rate.py`와 다른 점이다.
+COLLECT_TIERS = (1, 3, 6, 12, 24)
+"""수집 주기 등급(시간). `scripts/measure_news_rate.py`가 이걸 가져다 쓴다."""
+ADAPTIVE_BUDGET = 250
+"""한 회차가 쓸 건수 예산. 상한 1,000건의 1/4만 쓰고 나머지는 버스트 여유로 둔다."""
+ADAPTIVE_WINDOW_HOURS = 48
+"""상한 이력을 이 기간만 본다. 지나면 설정 주기로 **저절로 돌아간다** —
+되돌리는 것을 사람 기억에 맡기지 않는다."""
+
 
 @dataclass
 class Plan:
@@ -74,7 +97,11 @@ def build_plan(
             if symbols and holding.symbol not in symbols:
                 continue
             last = store.last_run_at(holding.symbol, source)
-            interval = max(1, holding.collect_every_hours)
+            capped = store.last_capped_run(
+                holding.symbol, source,
+                _utc(now) - timedelta(hours=ADAPTIVE_WINDOW_HOURS))
+            interval, adapted = adaptive_interval_hours(
+                holding.collect_every_hours, capped, now)
             if force:
                 due, reason = True, "강제 실행"
             elif last is None:
@@ -85,9 +112,50 @@ def build_plan(
                 reason = (f"{elapsed.total_seconds()/3600:.1f}h 경과 / {interval}h 주기"
                           if due else
                           f"대기 ({(timedelta(hours=interval) - elapsed).total_seconds()/3600:.1f}h 남음)")
+            if adapted:
+                reason = f"{reason} · {adapted}"
             plans.append(Plan(holding, source, interval, last, due, reason,
                               lookback_days=compute_lookback_days(last, interval, now)))
     return plans
+
+
+def observed_rate_per_hour(capped_run) -> float | None:
+    """상한에 걸린 회차가 관측한 **원본 유입 속도**(건/시간).
+
+    `pages × 100`이 그 회차가 벤더에서 받은 원본 건수고, `ran_at - oldest_seen`이
+    그게 덮은 시간이다. 저장된 `fetched`는 제외 규칙을 통과한 뒤라서 쓰지 않는다 —
+    예산을 태우는 것은 **버려진 기사까지 포함한 원본**이다.
+    """
+    if not capped_run or not capped_run.get("oldest_seen"):
+        return None
+    ran = _utc(datetime.fromisoformat(capped_run["ran_at"]))
+    oldest = _utc(datetime.fromisoformat(capped_run["oldest_seen"]))
+    span_h = (ran - oldest).total_seconds() / 3600
+    pages = int(capped_run.get("pages") or 0)
+    if span_h <= 0 or pages <= 0:
+        return None
+    return pages * 100 / span_h
+
+
+def adaptive_interval_hours(configured_hours: int, capped_run, now: datetime
+                            ) -> tuple[int, str]:
+    """이번 회차에 쓸 주기와 그 사유.
+
+    상한 이력이 없으면 설정값 그대로다. 있으면 관측 속도로 **감당 가능한 주기**를
+    계산해 등급을 내린다. **좁히기만 한다** — 설정보다 늘리지 않는다.
+    """
+    configured = max(1, int(configured_hours))
+    rate = observed_rate_per_hour(capped_run)
+    if rate is None or rate <= 0:
+        return configured, ""
+    capacity_h = ADAPTIVE_BUDGET / (rate * LOOKBACK_MULTIPLIER)
+    # **감당 가능한 가장 긴 등급**을 고른다. 가장 짧은 것을 고르면 느린 종목까지
+    # 1시간으로 끌어내려 호출만 늘고 커버리지는 그대로다.
+    tier = max((t for t in COLLECT_TIERS if t <= capacity_h), default=COLLECT_TIERS[0])
+    if tier >= configured:
+        return configured, ""
+    return tier, (f"상한 이력 {capped_run['ran_at'][:16]} "
+                  f"({rate:.0f}건/h) → {configured}h에서 {tier}h로 좁힘")
 
 
 def compute_lookback_days(

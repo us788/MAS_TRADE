@@ -285,6 +285,23 @@ class Store:
                 "WHERE symbol = ? AND source = ?", (symbol, source)).fetchone()
         return datetime.fromisoformat(row["ran_at"]) if row and row["ran_at"] else None
 
+    def last_capped_run(self, symbol: str, source: str, since: datetime) -> dict | None:
+        """`since` 이후 **페이지 상한에 걸린** 가장 최근 회차.
+
+        적응형 수집 주기의 근거다 (`collector.adaptive_interval_hours`).
+        상한에 걸렸다는 것은 그 종목의 유입이 지금 주기로 감당 안 된다는 **관측**이다 —
+        한 시점에 재는 `measure_news_rate.py`와 달리 버스트가 오는 순간에 찍힌다.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT ran_at, oldest_seen, pages FROM collection_runs "
+                "WHERE symbol = ? AND source = ? AND reached_floor = 0 "
+                "  AND oldest_seen IS NOT NULL AND ran_at >= ? "
+                "ORDER BY ran_at DESC LIMIT 1",
+                (symbol, source, _utc(since).isoformat()),
+            ).fetchone()
+        return dict(row) if row else None
+
     def record_gap(self, market: str, source: str, symbol: str, reason: str,
                    at: datetime | None = None) -> None:
         """수집 실패·커버리지 미달을 남긴다. 조용히 넘어가면 구멍을 영영 모른다."""

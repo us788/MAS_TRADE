@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.data.collector import COLLECT_TIERS
 from src.data.naver_news import MAX_START, NaverNews, parse_item
 from src.data.universe import UNIVERSE_PATH, load_universe
 
@@ -29,7 +30,9 @@ from src.data.universe import UNIVERSE_PATH, load_universe
 # 치우치는 것이 맞다. 측정도 장중(뉴스가 몰리는 시간)에 하므로 야간 속도는 더 낮고,
 # 실적 시즌에는 몇 배로 뛴다 — 평균치에 딱 맞춘 주기는 스파이크에서 반드시 뚫린다.
 SAFETY_BUDGET = MAX_START // 4
-TIERS = (1, 3, 6, 12, 24)
+# 등급은 수집기와 **한 곳에서** 정의한다. 적응형 주기(`adaptive_interval_hours`)가
+# 같은 등급으로 내려오므로 둘이 어긋나면 주기가 오락가락한다.
+TIERS = COLLECT_TIERS
 
 
 def assign_tier(rate_per_hour: float) -> int:
