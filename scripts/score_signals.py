@@ -31,17 +31,24 @@ class StoredSignal:
     signal_id: str = ""
 
 
-def load(store: SignalStore, market: str | None, run_id: str | None
-         ) -> list[StoredSignal]:
-    sql = "SELECT * FROM signals"
+def load(store: SignalStore, market: str | None, run_id: str | None,
+         kind: str | None = "baseline") -> list[StoredSignal]:
+    """**기본은 `baseline` 트랙만** 채점한다.
+
+    같은 시점을 여러 번 돌리는 측정(노이즈 바닥)이 본 트랙에 섞이면 표본이 부풀고
+    적중률이 오염된다. `--kind` 로 다른 트랙을, `--kind all` 로 전부 본다.
+    """
+    sql = "SELECT s.* FROM signals s JOIN runs r ON r.run_id = s.run_id"
     where, params = [], []
     if market:
-        where.append("market = ?"); params.append(market)
+        where.append("s.market = ?"); params.append(market)
     if run_id:
-        where.append("run_id = ?"); params.append(run_id)
+        where.append("s.run_id = ?"); params.append(run_id)
+    if kind is not None:
+        where.append("r.kind = ?"); params.append(kind)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY as_of, symbol"
+    sql += " ORDER BY s.as_of, s.symbol"
     with store.connect() as conn:
         rows = [dict(r) for r in conn.execute(sql, params)]
     return [StoredSignal(r["symbol"], r["market"],
@@ -83,6 +90,8 @@ def main() -> int:
     ap.add_argument("--market", choices=("KR", "US"), action="append")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--detail", action="store_true")
+    ap.add_argument("--kind", default="baseline",
+                    help="채점할 실행 트랙. 기본 baseline. all 이면 전부")
     args = ap.parse_args()
 
     store = SignalStore()
@@ -90,15 +99,18 @@ def main() -> int:
     markets = args.market or ["KR", "US"]
 
     for market in markets:
-        sigs = load(store, market, args.run_id)
+        sigs = load(store, market, args.run_id,
+                    None if args.kind == "all" else args.kind)
         if not sigs:
             print(f"{market}: 시그널이 없습니다.")
             continue
         scored = scorer.score_many(sigs)
         print(f"════ {market} · 시그널 {len(sigs)}건 ════")
+        ids = {s.signal_id for s in sigs}
         with store.connect() as conn:
             raw = [dict(r) for r in conn.execute(
-                "SELECT as_of, created_at FROM signals WHERE market = ?", (market,))]
+                "SELECT signal_id, as_of, created_at FROM signals WHERE market = ?",
+                (market,)) if r["signal_id"] in ids]
         line = lateness_line(raw)
         if line:
             print(line)

@@ -275,3 +275,45 @@ def test_상한_안이면_늦어도_재시도한다():
 def test_as_of가_없으면_지연을_따지지_않는다():
     """수동 실행(`--as-of` 없이)은 이 판정을 타지 않는다."""
     assert retry_decision({"005930"}, 1, None, _NOW, None)[0] is True
+
+
+# ---- 실행 트랙 분리 (2026-11-22) ----
+#
+# 노이즈 바닥 측정은 같은 구성을 같은 시점에 여러 번 돌려야 한다
+# (기획서 6절: "3회 이상 반복해 평균이 아니라 분산까지 본다").
+# 그 반복이 본 트랙에 섞이면 같은 시점이 여러 번 세어져 적중률이 오염된다.
+
+
+def _run_once(store, kind):
+    return run_market([_ctx()], market="KR", as_of=AS_OF, store=store, kind=kind,
+                      agent=BaselineAgent(FakeClient([(json.dumps(GOOD), _call())])))
+
+
+def test_채점은_기본으로_baseline_트랙만_본다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SignalStore(db_path=Path(tmp) / "s.sqlite3")
+        _run_once(store, "baseline")
+        _run_once(store, "noise-1")
+        _run_once(store, "noise-2")
+        assert len(store.all_signals()) == 1              # 기본은 baseline만
+        assert len(store.all_signals(kind=None)) == 3     # 전부 보려면 명시해야 한다
+
+
+def test_트랙마다_완료_판정이_따로_간다():
+    """`noise-1`로 돌렸다고 본 트랙이 끝난 것이 아니다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SignalStore(db_path=Path(tmp) / "s.sqlite3")
+        _run_once(store, "noise-1")
+        assert store.signed_symbols("baseline", "KR", AS_OF) == set()
+        assert store.signed_symbols("noise-1", "KR", AS_OF) == {"005930"}
+        assert store.attempt_history("baseline", "KR", AS_OF)[0] == 0
+        assert store.attempt_history("noise-1", "KR", AS_OF)[0] == 1
+
+
+def test_kind가_runs에_그대로_남는다():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SignalStore(db_path=Path(tmp) / "s.sqlite3")
+        _run_once(store, "noise-3")
+        with store.connect() as conn:
+            kinds = [r["kind"] for r in conn.execute("SELECT kind FROM runs")]
+        assert kinds == ["noise-3"]

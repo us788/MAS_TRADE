@@ -331,13 +331,22 @@ class SignalStore:
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM signals WHERE run_id = ? ORDER BY symbol", (run_id,))]
 
-    def all_signals(self, market: str | None = None) -> list[dict]:
-        sql = "SELECT * FROM signals"
-        params: list = []
+    def all_signals(self, market: str | None = None,
+                    kind: str | None = "baseline") -> list[dict]:
+        """시그널 목록. **기본은 `baseline` 트랙만** 본다.
+
+        노이즈 바닥 측정은 같은 시점을 여러 번 돌리므로(기획서 6절) 그대로 섞이면
+        같은 시점이 여러 번 세어진다. `kind=None`을 주면 전부 본다.
+        """
+        sql = "SELECT s.* FROM signals s JOIN runs r ON r.run_id = s.run_id"
+        where, params = [], []
         if market:
-            sql += " WHERE market = ?"
-            params.append(market)
-        sql += " ORDER BY as_of, symbol"
+            where.append("s.market = ?"); params.append(market)
+        if kind is not None:
+            where.append("r.kind = ?"); params.append(kind)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY s.as_of, s.symbol"
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(sql, params)]
 

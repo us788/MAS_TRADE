@@ -49,7 +49,7 @@ launchd 작업 네 개가 자동으로 돌린다. **이제 양쪽 시장 모두 
 | 채점 | 5거래일 **US 85/100 · KR 87/97** · 20거래일 **US 40/100 · KR 43/97** |
 | LLM 비용 | 누적 **$3.6613** · 256회 · 캐시 적중 23% |
 | 정기 실행 | collect 매시 · prices 일 1회 · baseline 주 1회 · health 일 1회 |
-| 테스트 | **239건 통과** |
+| 테스트 | **242건 통과** |
 | 코드 | 45파일 6,981줄 |
 | 디스크 | 여유 20GB (11-06 17GB에서 회복) |
 | 열린 gap | 커버리지 미달 **누적 4건** (전부 기아 · 10월 건). **10-31 이후 추가 0건** |
@@ -83,7 +83,7 @@ python scripts/run_baseline.py --status     # 시그널·토큰·비용 누적
 python scripts/collect_news.py --status     # 기사 현황, 등급 교차표, 열린 gap
 python scripts/collect_prices.py --status   # 가격 현황, 종목별 커버리지
 scripts/install_scheduler.sh --status       # launchd 4작업 + 마지막 종료 코드
-python -m pytest -q                         # 239건
+python -m pytest -q                         # 242건
 ```
 
 `health_check.py`의 항목별 의미
@@ -109,8 +109,9 @@ python -m pytest -q                         # 239건
 
 기획서 6절의 "3회 이상 반복해 평균이 아니라 분산까지 본다"가 이것이다.
 
-> 착수 전 확인: 같은 `as_of`로 반복 실행하면 `has_successful_run` 가드에 막힌다.
-> 반복 실행 경로를 어떻게 열지(예: `kind`에 시드를 붙인다)부터 정해야 한다.
+> **11-22에 열었다.** 막던 것은 가드가 아니라 하류였다 — 읽는 쪽에 `kind` 필터가
+> 없어 반복분이 본 성적에 그대로 섞였다. 이제 채점·포트폴리오가 기본으로
+> `baseline` 트랙만 보고, 다른 트랙은 옵트인이다.
 
 ## 2순위 — 유니버스 확대
 
@@ -436,7 +437,13 @@ DNS를 최대 30초 기다리고, 하루(주) 1회 가드가 중복 실행을 �
 
 ## 미결 (급한 순)
 
-1. **노이즈 바닥 측정** — 모든 A/B의 선행 조건
+1. **노이즈 바닥 측정** — 모든 A/B의 선행 조건. **11-22에 선행 조건을 넣어 이제
+   돌릴 수 있다.** 같은 시점을 `--kind noise-1/2/3`으로 반복하고 `Var(A−B)`의 순수
+   잡음 수준을 잰다. 하루·약 $2
+   ```bash
+   python scripts/run_baseline.py --as-of '...' --kind noise-1
+   python scripts/score_signals.py --kind noise-1
+   ```
 2. **전 종목 스크리닝 점수 저장** — 유니버스 확대의 선행 조건. 지금 `signals`는
    고른 종목만 남겨서 *"고른 것과 안 고른 것의 차이"*를 모른다. 그게 IC 계산에 필요하다
 3. **최소 거래대금 필터** — 유니버스 확대 전. 시장충격 모델이 없다

@@ -75,16 +75,16 @@ def show_status(store: SignalStore) -> int:
     return 0
 
 
-def market_plan(store, universe, market, as_of, now):
+def market_plan(store, universe, market, as_of, now, kind="baseline"):
     """그 시장에서 **이번에 돌릴 종목**과 사유.
 
     **벤더도 LLM도 부르지 않는다** — `runs`·`signals` 테이블만 본다.
     돈이 나가기 전에 판정해야 한다(2026-09-28 교훈).
     """
     wanted = {h.symbol for h in universe.market(market)}
-    done = store.signed_symbols("baseline", market, as_of)
+    done = store.signed_symbols(kind, market, as_of)
     missing = wanted - done
-    attempts, last = store.attempt_history("baseline", market, as_of)
+    attempts, last = store.attempt_history(kind, market, as_of)
     go, why = retry_decision(missing, attempts, last, now, as_of)
     return (missing if go else set()), why
 
@@ -100,6 +100,10 @@ def main() -> int:
                          "시점이면 건너뛴다. launchd 주간 작업이 쓴다")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--kind", default="baseline",
+                    help="실행 트랙. 기본 baseline. 노이즈 바닥 측정처럼 같은 시점을 "
+                         "여러 번 돌릴 때 다른 이름을 줘서 본 트랙과 섞이지 않게 한다 "
+                         "(예: --kind noise-1). 채점은 기본으로 baseline만 본다")
     ap.add_argument("--check-due", action="store_true",
                     help="이번 주 돌릴 것이 남았는지만 본다. 있으면 종료코드 0, 없으면 1. "
                          "벤더도 LLM도 부르지 않는다")
@@ -133,7 +137,7 @@ def main() -> int:
         for m in markets:
             if not args.weekly:
                 due.append(m); continue
-            todo, why = market_plan(store, universe, m, as_of, now)
+            todo, why = market_plan(store, universe, m, as_of, now, args.kind)
             print(f"  {m}: {why}")
             if todo:
                 due.append(m)
@@ -148,7 +152,7 @@ def main() -> int:
     for market in markets:
         todo = None
         if args.weekly:
-            todo, why = market_plan(store, universe, market, as_of, now)
+            todo, why = market_plan(store, universe, market, as_of, now, args.kind)
             if not todo:
                 print(f"{market} {as_of.isoformat()}: {why}")
                 continue
@@ -177,7 +181,8 @@ def main() -> int:
 
         print(f"════ {market} · {as_of.isoformat()} · {len(contexts)}종목 ════")
         out = run_market(contexts, market=market, as_of=as_of, store=store,
-                         agent=BaselineAgent(), universe_version=universe.version)
+                         agent=BaselineAgent(), universe_version=universe.version,
+                         kind=args.kind)
         for r in out["results"]:
             if r.ok:
                 print(f"  OK   {r.context.symbol:<8s} {r.context.name:<18s} "

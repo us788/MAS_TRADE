@@ -170,16 +170,21 @@ class BaselineAgent:
 
 def run_market(contexts: list[SymbolContext], *, market: str, as_of: datetime,
                store, agent: BaselineAgent | None = None,
-               universe_version: str = "") -> dict:
+               universe_version: str = "", kind: str = AGENT_NAME) -> dict:
     """한 시장 한 시점을 통째로 돌리고 **전량 저장**한다.
 
     실패한 종목은 건너뛰되 호출 기록은 남는다. 어디서 몇 건이 깨졌는지를 나중에
     셀 수 있어야 한다.
+
+    `kind`가 **트랙을 가른다.** 노이즈 바닥 측정은 같은 구성을 같은 시점에 여러 번
+    돌려야 하는데(기획서 6절: "3회 이상 반복해 평균이 아니라 분산까지 본다"),
+    그 반복이 본 트랙에 섞이면 같은 시점이 여러 번 세어져 표본이 부풀고 채점이
+    오염된다. 읽는 쪽이 기본으로 `baseline`만 보므로 다른 `kind`는 옵트인이다.
     """
     agent = agent or BaselineAgent()
     prefix = system_prompt(market)
     prompt_hash = store.register_prompt(market, prefix)
-    run = store.start_run(AGENT_NAME, market, as_of, prompt_version(market),
+    run = store.start_run(kind, market, as_of, prompt_version(market),
                           universe_version)
 
     results, ok = [], 0
