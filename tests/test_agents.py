@@ -215,3 +215,63 @@ def test_실행_기록에_프롬프트_버전과_유니버스_버전이_남는�
         assert r["prompt_version"] == prompt_version("KR")
         assert r["universe_version"] == "2026-09-15"
         assert r["attempted"] == 1 and r["succeeded"] == 1
+
+
+# ---- 재시도 정책 (2026-11-22) ----
+#
+# 완료 판정의 단위가 회차가 아니라 **종목**이어야 한다. 회차로 보면 13/15로 끝난
+# 주의 나머지 2건이 재시도 없이 사라진다 — 09-23부터 다섯 회차에 16건을 그렇게 잃었다.
+# 다만 그냥 열면 안 된다. 이 작업은 네트워크 변경마다 발화한다(실측 분당 3회).
+
+from datetime import timedelta as _td
+
+from src.agents.baseline import (MAX_ATTEMPTS_PER_AS_OF, RETRY_COOLDOWN,
+                                 RETRY_MAX_LATENESS, retry_decision)
+
+_NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+_AS_OF = datetime(2026, 11, 17, 22, 0, tzinfo=timezone.utc)      # 11-18 07:00 KST
+
+
+def test_다_돌렸으면_돌지_않는다():
+    go, why = retry_decision(set(), 1, _NOW - _td(hours=4), _NOW, _AS_OF)
+    assert go is False and "다 돌렸" in why
+
+
+def test_빠진_종목이_있으면_그것만_재시도한다():
+    """13/15로 끝난 주의 나머지 2건이 여기서 살아난다."""
+    go, why = retry_decision({"005930", "000660"}, 1, _NOW - _td(hours=4), _NOW, _AS_OF)
+    assert go is True
+    assert "005930" in why and "000660" in why
+
+
+def test_시도_한도를_넘기면_포기한다():
+    """영영 실패하는 종목 하나가 매 발화마다 LLM을 부르면 09-28 사고가 반복된다."""
+    go, why = retry_decision({"005930"}, MAX_ATTEMPTS_PER_AS_OF,
+                             _NOW - _td(hours=4), _NOW, _AS_OF)
+    assert go is False and "소진" in why
+
+
+def test_쿨다운_안에는_돌지_않는다():
+    """발화 폭주(분당 3회)에서 한도를 한 번에 태우지 않는다."""
+    go, why = retry_decision({"005930"}, 1, _NOW - RETRY_COOLDOWN / 2, _NOW, _AS_OF)
+    assert go is False and "쿨다운" in why
+
+
+def test_너무_늦으면_재시도하지_않는다():
+    """**이 가드가 2026-11-22 사고의 재발 방지다.** 그때 as_of에서 106시간 지난
+    시그널 2건이 만들어졌다. 늦게 만든 시그널 자체는 오염이 아니지만(입력이 as-of로
+    막혀 있다), 재시도는 '다시 돌릴까'를 고르는 행위라 상한이 필요하다.
+    """
+    late = _AS_OF + RETRY_MAX_LATENESS + _td(hours=1)
+    go, why = retry_decision({"005930"}, 1, None, late, _AS_OF)
+    assert go is False and "포기" in why
+
+
+def test_상한_안이면_늦어도_재시도한다():
+    ok = _AS_OF + RETRY_MAX_LATENESS - _td(hours=1)
+    assert retry_decision({"005930"}, 1, None, ok, _AS_OF)[0] is True
+
+
+def test_as_of가_없으면_지연을_따지지_않는다():
+    """수동 실행(`--as-of` 없이)은 이 판정을 타지 않는다."""
+    assert retry_decision({"005930"}, 1, None, _NOW, None)[0] is True

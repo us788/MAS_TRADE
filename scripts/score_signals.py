@@ -49,6 +49,35 @@ def load(store: SignalStore, market: str | None, run_id: str | None
                          r["confidence"], r["signal_id"]) for r in rows]
 
 
+def lateness_line(rows) -> str:
+    """as_of → 생성 지연을 요약한다.
+
+    **이 지연은 표본에서 빼지 않는다** (2026-11-22 결정). 컨텍스트가
+    `known_at <= as_of`로 막혀 있어 LLM은 미래를 못 보고, 이 프로젝트가 재는 것은
+    실행 가능성이 아니라 **구조의 판단력**이다. 다만 **한 번도 명시적으로 결정한
+    적 없던 사실**이라 숫자를 늘 보이게 둔다 — 노트북이 자다 깨며 도는 구조라
+    회차가 몇 시간에서 며칠까지 늘어진다.
+
+    층 2(가상 포트폴리오)는 "체결은 시그널 당일 종가" 전제라 이 지연이 더 아프다.
+    `docs/baselines.md` 7.1절과 같이 읽는다.
+    """
+    hours = []
+    for r in rows:
+        try:
+            c = datetime.fromisoformat(r["created_at"])
+            a = datetime.fromisoformat(r["as_of"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        hours.append((c - a).total_seconds() / 3600)
+    if not hours:
+        return ""
+    hours.sort()
+    mid = hours[len(hours) // 2]
+    over24 = sum(1 for h in hours if h > 24)
+    return (f"  생성 지연  중앙값 {mid:.1f}h · 최대 {hours[-1]:.0f}h · "
+            f"24h 초과 {over24}건({over24/len(hours)*100:.1f}%)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="시그널 채점")
     ap.add_argument("--market", choices=("KR", "US"), action="append")
@@ -67,6 +96,12 @@ def main() -> int:
             continue
         scored = scorer.score_many(sigs)
         print(f"════ {market} · 시그널 {len(sigs)}건 ════")
+        with store.connect() as conn:
+            raw = [dict(r) for r in conn.execute(
+                "SELECT as_of, created_at FROM signals WHERE market = ?", (market,))]
+        line = lateness_line(raw)
+        if line:
+            print(line)
 
         if args.detail:
             for s in scored:

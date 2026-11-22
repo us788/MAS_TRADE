@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -33,6 +33,58 @@ THINKING = True
 # 1600으로 뒀더니 1600 전부가 추론에 쓰이고 본문이 빈 문자열로 왔다.
 # thinking 모드에서는 추론이 수천 토큰을 쓰므로 넉넉히 준다.
 MAX_TOKENS = 8000
+
+# ---- 재시도 정책 (2026-11-22) ----
+#
+# **완료 판정의 단위는 회차가 아니라 종목이다.** 전에는 한 종목이라도 성공하면
+# 그 주를 끝난 것으로 보고 건너뛰었다. 그래서 13/15로 끝난 주의 나머지 2건이
+# 재시도 없이 사라졌다 — 09-23부터 다섯 회차에 걸쳐 16건을 그렇게 잃었다.
+#
+# 그런데 재시도를 그냥 열면 안 된다. 이 작업은 **네트워크 변경마다 발화한다**
+# (실측 분당 3회). 영영 실패하는 종목 하나가 매 발화마다 LLM을 부르면 09-28에
+# 가격 수집으로 당한 일이 그대로 반복된다. 그래서 한도를 둘 건다.
+MAX_ATTEMPTS_PER_AS_OF = 4
+"""한 시점에 허용하는 총 시도 횟수. 정상은 1회, 부분 실패가 나야 2회째가 돈다."""
+RETRY_COOLDOWN = timedelta(minutes=30)
+"""직전 시도 이후 이만큼은 기다린다. 발화 폭주에서 한도를 한 번에 태우지 않는다."""
+RETRY_MAX_LATENESS = timedelta(hours=48)
+"""as_of에서 이만큼 지나면 재시도하지 않는다.
+
+**늦게 만든 시그널 자체는 오염이 아니다** — 컨텍스트가 `known_at <= as_of`로 막혀
+있어 LLM은 미래를 못 본다. 실제로 저장된 286건의 생성 지연이 중앙값 9.1시간,
+24시간 이내가 86.7%다(2026-11-22 실측). 이 프로젝트는 실행 가능성이 아니라
+**구조의 판단력**을 재므로 그 지연을 표본에서 빼지 않는다 — 대신 기록해 보고한다.
+
+다만 **상한은 있어야 한다.** 재시도는 "다시 돌릴까"를 고르는 행위라 정상 회차와
+다르다. 결과가 거의 다 나온 뒤에 되찾은 표본은 쓸모도 적고, 실패가 특정 종목에
+몰리면 표본 구성이 비뚤어진다. 48시간은 관측 분포의 꼬리(3.8%)를 자르는 선이다."""
+
+
+def retry_decision(missing, attempts: int, last_started: datetime | None,
+                   now: datetime, as_of: datetime | None = None) -> tuple[bool, str]:
+    """이번 발화에서 돌릴지와 그 사유.
+
+    **돈이 나가기 전에 판정한다** — 벤더도 LLM도 부르지 않고 `runs` 테이블만 본다.
+
+    상한 셋을 건다 — 지연(`RETRY_MAX_LATENESS`), 횟수, 쿨다운.
+    """
+    if not missing:
+        return False, "이미 다 돌렸습니다"
+    if as_of is not None and (now - as_of) > RETRY_MAX_LATENESS:
+        late_h = (now - as_of).total_seconds() / 3600
+        return False, (f"as_of에서 {late_h:.0f}시간 지났습니다 — "
+                       f"{len(missing)}건을 포기합니다 (상한 "
+                       f"{RETRY_MAX_LATENESS.total_seconds()/3600:.0f}시간)")
+    if attempts >= MAX_ATTEMPTS_PER_AS_OF:
+        return False, (f"재시도 {attempts}회를 소진했습니다 — "
+                       f"{len(missing)}건을 포기합니다 ({', '.join(sorted(missing))})")
+    if last_started is not None:
+        waited = now - last_started
+        if waited < RETRY_COOLDOWN:
+            left = (RETRY_COOLDOWN - waited).total_seconds() / 60
+            return False, f"직전 시도 뒤 쿨다운 {left:.0f}분 남았습니다"
+    return True, (f"{len(missing)}건 재시도 ({attempts + 1}/{MAX_ATTEMPTS_PER_AS_OF}) — "
+                  f"{', '.join(sorted(missing))}")
 
 
 class BaselineResponse(BaseModel):

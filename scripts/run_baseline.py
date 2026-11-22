@@ -12,13 +12,13 @@ DeepSeek 오프피크 구간이기도 해서 비용도 절반이다.
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.agents.baseline import BaselineAgent, run_market
+from src.agents.baseline import BaselineAgent, retry_decision, run_market
 from src.agents.context import ContextBuilder
 from src.agents.prompts import prompt_version, system_prompt
 from src.agents.store import SignalStore
@@ -75,6 +75,20 @@ def show_status(store: SignalStore) -> int:
     return 0
 
 
+def market_plan(store, universe, market, as_of, now):
+    """그 시장에서 **이번에 돌릴 종목**과 사유.
+
+    **벤더도 LLM도 부르지 않는다** — `runs`·`signals` 테이블만 본다.
+    돈이 나가기 전에 판정해야 한다(2026-09-28 교훈).
+    """
+    wanted = {h.symbol for h in universe.market(market)}
+    done = store.signed_symbols("baseline", market, as_of)
+    missing = wanted - done
+    attempts, last = store.attempt_history("baseline", market, as_of)
+    go, why = retry_decision(missing, attempts, last, now, as_of)
+    return (missing if go else set()), why
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="베이스라인 시그널 생성")
     ap.add_argument("--market", choices=("KR", "US"), action="append")
@@ -113,8 +127,16 @@ def main() -> int:
     # 내려받았다** — 2시간 만에 벤더 호출 수천 건, price_gaps 241건, yfinance가
     # UNH·XOM을 거절하기 시작했다. 값싼 판정을 앞에 세워 그 경로를 끊는다.
     if args.check_due:
-        due = [m for m in markets
-               if not (args.weekly and store.has_successful_run("baseline", m, as_of))]
+        universe = load_universe()
+        now = datetime.now(timezone.utc)
+        due = []
+        for m in markets:
+            if not args.weekly:
+                due.append(m); continue
+            todo, why = market_plan(store, universe, m, as_of, now)
+            print(f"  {m}: {why}")
+            if todo:
+                due.append(m)
         print(f"{as_of.isoformat()}  남은 시장 {due or '없음'}")
         return 0 if due else 1
 
@@ -122,11 +144,20 @@ def main() -> int:
     universe = load_universe()
     total_ok = total = 0
 
+    now = datetime.now(timezone.utc)
     for market in markets:
-        if args.weekly and store.has_successful_run("baseline", market, as_of):
-            print(f"{market} {as_of.isoformat()}: 이미 돌렸습니다. 건너뜁니다.")
-            continue
+        todo = None
+        if args.weekly:
+            todo, why = market_plan(store, universe, market, as_of, now)
+            if not todo:
+                print(f"{market} {as_of.isoformat()}: {why}")
+                continue
+            print(f"{market} {as_of.isoformat()}: {why}")
         contexts = builder.build_market(market, as_of)
+        if todo is not None:
+            # **빠진 종목만 돌린다.** 이미 시그널이 남은 종목을 다시 부르면
+            # 표본이 중복되고 돈이 두 번 나간다.
+            contexts = [c for c in contexts if c.symbol in todo]
         if args.limit:
             contexts = contexts[:args.limit]
         if not contexts:

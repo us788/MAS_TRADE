@@ -202,6 +202,40 @@ class SignalStore:
             ).fetchone()
         return row is not None
 
+    def signed_symbols(self, kind: str, market: str, as_of: datetime) -> set[str]:
+        """그 시점에 **이미 시그널이 남은** 종목.
+
+        완료 판정의 단위가 회차가 아니라 **종목**이어야 한다. 회차 단위로 보면
+        13/15로 끝난 주의 나머지 2건이 재시도 없이 영구 손실이 된다 —
+        09-23부터 그렇게 16건을 잃었다.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT s.symbol FROM signals s "
+                "JOIN runs r ON r.run_id = s.run_id "
+                "WHERE r.kind = ? AND s.market = ? AND s.as_of = ?",
+                (kind, market, as_of.isoformat()),
+            ).fetchall()
+        return {r["symbol"] for r in rows}
+
+    def attempt_history(self, kind: str, market: str,
+                        as_of: datetime) -> tuple[int, datetime | None]:
+        """그 시점에 **몇 번 시도했고 마지막이 언제였나**.
+
+        재시도를 열면 한도가 필요하다. 이 작업은 네트워크 변경마다 발화하므로
+        (실측 분당 3회) 영영 실패하는 종목 하나가 매 발화마다 LLM을 부르게 된다 —
+        09-28에 가격 수집으로 똑같이 당했다.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, MAX(started_at) AS last FROM runs "
+                "WHERE kind = ? AND market = ? AND as_of = ?",
+                (kind, market, as_of.isoformat()),
+            ).fetchone()
+        n = row["n"] if row else 0
+        last = datetime.fromisoformat(row["last"]) if row and row["last"] else None
+        return n, last
+
     def finish_run(self, run: RunHandle, attempted: int, succeeded: int,
                    notes: str | None = None) -> None:
         with self.connect() as conn:
