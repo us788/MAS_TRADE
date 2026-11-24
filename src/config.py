@@ -52,6 +52,17 @@ FINNHUB_BASE_URL = os.getenv("FINNHUB_BASE_URL", "https://finnhub.io/api/v1")
 FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred")
 FRED_TIMEOUT_SEC = int(os.getenv("FRED_TIMEOUT_SEC", "30"))
 
+# ---- KR 재무 (DART) ----
+#
+# **접수일자 기준으로만 쓴다.** 회계기간이 끝난 시점이 아니라 공시된 시점부터
+# 시장이 아는 정보다 (기획서 8절). 다행히 재무 응답이 `rcept_no`를 들고 오고
+# 앞 8자리가 접수일자라, 공시검색 API를 따로 조인할 필요가 없다.
+#
+# US(EDGAR)는 IP가 Akamai 엣지에서 막혀 있다 — "Request Rate Threshold Exceeded".
+# UA·헤더 문제가 아니라 sec.gov 홈페이지조차 403이다 (2026-11-25 확인).
+DART_BASE_URL = os.getenv("DART_BASE_URL", "https://opendart.fss.or.kr/api")
+DART_TIMEOUT_SEC = int(os.getenv("DART_TIMEOUT_SEC", "30"))
+
 # ---- 네이버 검색 API (KR 뉴스) ----
 # 발급처에 따라 도메인·경로·헤더가 전부 다르다. .env의 NAVER_API_FLAVOR로 고른다.
 NAVER_API_FLAVOR = os.getenv("NAVER_API_FLAVOR", "apihub")
