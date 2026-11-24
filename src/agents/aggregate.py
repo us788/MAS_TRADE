@@ -140,6 +140,29 @@ MAX_BUYS_PER_SECTOR = 3
 #: **갈린 판단을 밀어붙이는 것은 잡음을 거래하는 일이다.**
 MAX_DISPERSION = 0.7
 
+#: **에이전트 수가 바뀌면 같은 숫자가 다른 뜻이 된다** (2026-11-25 실측).
+#:
+#: 0.7은 셋을 전제로 잡은 값인데, 넷이 되면 분산값의 분포 자체가 바뀐다.
+#: 매수 1 · 매도 1 · 보유 2가 정확히 **0.707**이라 0.7이 그 덩어리 한가운데를
+#: 가른다. 균등 난수로 전수 열거하면:
+#:
+#:     n=3  분산값 {0, 0.471, 0.816, 0.943}   기각 12/27 = 44.4%
+#:     n=4  분산값 {0, 0.433, 0.5, 0.707, 0.829, 0.866, 1.0}   기각 50/81 = 61.7%
+#:
+#: 기각은 `hold`로 바뀌므로 그대로 두면 **KR의 실행 가능한 시그널이 29.6% → 12.4%**로
+#: 줄어든다(US의 절반 이하). 시장 간 성적을 비교하지 않기로 한 것(11-25 결정)과는
+#: **다른 문제다** — KR 안에서 쓸 수 있는 표본이 그만큼 줄어 검정력이 떨어진다.
+#:
+#: 그래서 **균등 난수 기준 기각률이 비슷해지도록** 의견 수별로 잡는다.
+#: 실제 에이전트는 균등 난수가 아니지만, 한쪽 시장만 조용히 빡빡해지는 것보다는
+#: 명시적인 기준이 낫다. 표본이 쌓이면 기각된 시그널의 사후 성적으로 보정한다.
+#:
+#:     n=3  0.70  → 기각 12/27 = 44.4%
+#:     n=4  0.75  → 기각 38/81 = 46.9%
+#:
+#: **의견 수로 고른다** — 에이전트가 빠진 종목은 그 수에 맞는 값을 쓴다.
+DISPERSION_LIMIT = {3: 0.70, 4: 0.75}
+
 
 @dataclass
 class RiskInput:
@@ -162,10 +185,17 @@ class RiskEngine:
 
     def __init__(self, *, max_vol_ratio: float = MAX_VOL_RATIO,
                  max_buys_per_sector: int = MAX_BUYS_PER_SECTOR,
-                 max_dispersion: float = MAX_DISPERSION) -> None:
+                 max_dispersion: float | None = None) -> None:
         self.max_vol_ratio = max_vol_ratio
         self.max_buys_per_sector = max_buys_per_sector
+        #: None이면 의견 수에 맞춰 고른다. 값을 주면 그 값으로 고정한다(테스트·비교군).
         self.max_dispersion = max_dispersion
+
+    def dispersion_limit(self, n_opinions: int) -> float:
+        """의견 수에 맞는 분산 상한. 표에 없는 수는 셋 기준으로 떨어진다."""
+        if self.max_dispersion is not None:
+            return self.max_dispersion
+        return DISPERSION_LIMIT.get(n_opinions, MAX_DISPERSION)
 
     def evaluate(self, aggregates: Sequence[Aggregate],
                  inputs: dict[str, RiskInput]) -> dict[str, RiskVerdict]:
@@ -175,8 +205,9 @@ class RiskEngine:
             reasons, rules = [], []
             ri = inputs.get(agg.symbol)
 
-            if agg.dispersion > self.max_dispersion:
-                reasons.append(f"의견 분산 {agg.dispersion:.2f} > {self.max_dispersion}")
+            limit = self.dispersion_limit(len(agg.votes))
+            if agg.dispersion > limit:
+                reasons.append(f"의견 분산 {agg.dispersion:.2f} > {limit}")
                 rules.append("dispersion")
 
             if ri and ri.volatility and ri.index_volatility:

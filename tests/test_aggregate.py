@@ -194,3 +194,49 @@ def test_펀더멘털은_KR에서만_표를_던진다():
     assert us.__len__() == 3 and kr.__len__() == 4
     assert aggregate(us).direction is Direction.BUY     # 2/3
     assert aggregate(kr).direction is Direction.HOLD    # 2-2
+
+
+# ---- 분산 상한은 의견 수에 따라 달라진다 (2026-11-25) ----
+
+def test_분산_상한이_의견_수를_따른다():
+    """0.7은 **셋을 전제로** 잡은 값이다. 넷이면 매수1·매도1·보유2가 정확히
+    0.707이라 그 덩어리 한가운데가 잘린다 — 임계값이 뜻하는 바가 달라진다.
+    """
+    e = RiskEngine()
+    assert e.dispersion_limit(3) == 0.70
+    assert e.dispersion_limit(4) == 0.75
+    assert e.dispersion_limit(7) == MAX_DISPERSION      # 표에 없으면 셋 기준
+
+
+def test_넷일_때_매수1_매도1_보유2는_통과한다():
+    """0.707이다. 0.7로 자르면 기각되는데, 그건 임계값이 셋 전제라서 그렇다.
+    방향은 어차피 `hold`(보유가 최다)이므로 기각이 바꾸는 것은 `risk_approved`뿐이지만,
+    **같은 숫자가 에이전트 수에 따라 다른 뜻이 되는 것**을 고정해 둔다.
+    """
+    agg = aggregate(four("A", "buy", "sell", "hold", "hold"))
+    assert agg.dispersion == pytest.approx(0.707, abs=1e-3)
+    verdict = RiskEngine().evaluate([agg], {})["A"]
+    assert verdict.approved is True
+
+
+def test_넷일_때도_크게_갈리면_기각한다():
+    """상한을 올린 것이지 끈 것이 아니다. 매수3·매도1은 0.866이라 여전히 기각이다."""
+    agg = aggregate(four("A", "buy", "buy", "buy", "sell"))
+    assert agg.dispersion == pytest.approx(0.866, abs=1e-3)
+    assert RiskEngine().evaluate([agg], {})["A"].approved is False
+
+
+def test_값을_주면_그걸로_고정한다():
+    """비교군·ablation용. 의견 수를 무시하고 그 값으로 건다."""
+    e = RiskEngine(max_dispersion=0.7)
+    assert e.dispersion_limit(3) == e.dispersion_limit(4) == 0.7
+    agg = aggregate(four("A", "buy", "sell", "hold", "hold"))
+    assert e.evaluate([agg], {})["A"].approved is False
+
+
+def test_에이전트가_빠진_종목은_남은_의견_수로_판정한다():
+    """넷 중 둘이 타임아웃이면 그 종목은 n=2다. 넷 기준 상한을 쓰면 안 된다."""
+    e = RiskEngine()
+    agg = aggregate(ops("A", ("technical", "buy", 0.6), ("news", "sell", 0.6)))
+    assert len(agg.votes) == 2
+    assert e.dispersion_limit(2) == MAX_DISPERSION      # 표에 없다 → 셋 기준
