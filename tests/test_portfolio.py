@@ -171,3 +171,71 @@ def test_수익률은_가격을_따라간다():
         res = pf.run([(_as_of(days[0]), [Sig("A", "buy")]),
                       (_as_of(days[2]), [Sig("A", "buy")])])
         assert math.isclose(res.total_return, 0.5, rel_tol=1e-9)
+
+
+# ---- 현금 보유 (2026-11-24) ----
+#
+# 앞의 두 규칙은 편입 종목이 몇 개든 NAV를 전액 쓴다. 15종목 중 11종목이 매도여도
+# 남은 4종목에 100%를 몰아넣는다. 10-07 KR 회차가 실제로 11/15 매도였다.
+# 모델이 "다 팔아라"라고 말해도 포트폴리오가 풀 포지션이던 것은 **정보가 부족해서가
+# 아니라 그 말을 실행할 수단이 없어서**였다.
+
+
+def _four_symbols(tmp, jump_from=6):
+    """A·B·C는 100 고정, D만 `jump_from` 이후 2배."""
+    s = PriceStore(db_path=Path(tmp) / "p.sqlite3")
+    days = _days(20)
+    for i, d in enumerate(days):
+        bars = [Bar(x, "KR", d, close_px=100.0, close_tr=100.0, source="t")
+                for x in ("A", "B", "C")]
+        px = 100.0 if i < jump_from else 200.0
+        bars.append(Bar("D", "KR", d, close_px=px, close_tr=px, source="t"))
+        bars.append(Bar(BENCHMARKS["KR"][0], "INDEX", d,
+                        close_px=100.0, close_tr=100.0, source="t"))
+        s.upsert(bars)
+    return s, days
+
+
+def test_매도분이_현금으로_남는다():
+    """`sell_to_cash`는 유니버스 1/N씩 준다. 4종목 중 3개가 매도면 25%만 투자된다."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, days = _four_symbols(tmp)
+        sig = lambda w: [Sig("A", "sell"), Sig("B", "sell"),
+                         Sig("C", "sell"), Sig("D", "buy")]
+        series = [(_as_of(days[i]), sig(_as_of(days[i]))) for i in (0, 5, 10)]
+        rb = VirtualPortfolio(store, market="KR", rule="sell_to_cash",
+                              initial_capital=1_000_000).run(series).rebalances[0]
+        invested = rb.holdings.get("D", 0.0) * 100.0
+        assert abs(invested / rb.nav_after - 0.25) < 0.01       # 1/4만 투자
+        assert set(rb.holdings) == {"D"}
+
+
+def test_기존_규칙은_전액을_쓴다():
+    """**병행 측정이라 기존 동작이 바뀌면 안 된다.**"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, days = _four_symbols(tmp)
+        sig = lambda w: [Sig("A", "sell"), Sig("B", "sell"),
+                         Sig("C", "sell"), Sig("D", "buy")]
+        series = [(_as_of(days[i]), sig(_as_of(days[i]))) for i in (0, 5, 10)]
+        for rule in ("exclude_sell", "buy_only"):
+            rb = VirtualPortfolio(store, market="KR", rule=rule,
+                                  initial_capital=1_000_000).run(series).rebalances[0]
+            invested = rb.holdings.get("D", 0.0) * 100.0
+            assert abs(invested / rb.nav_after - 1.0) < 0.01    # 전액
+
+
+def test_전원_매도면_청산한다():
+    """**전에는 리밸런싱을 건너뛰어 직전 보유를 그대로 들고 갔다.**
+    전원 매도가 '현금화'가 아니라 '유지'로 번역된 것이다 — 어느 규칙의 정의로도 아니다.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store, days = _four_symbols(tmp, jump_from=99)          # D도 100 고정
+        buy = [Sig(x, "buy") for x in ("A", "B", "C", "D")]
+        sell = [Sig(x, "sell") for x in ("A", "B", "C", "D")]
+        series = [(_as_of(days[0]), buy), (_as_of(days[5]), sell),
+                  (_as_of(days[10]), sell)]
+        for rule in ("exclude_sell", "buy_only", "sell_to_cash"):
+            res = VirtualPortfolio(store, market="KR", rule=rule,
+                                   initial_capital=1_000_000).run(series)
+            after_sell = [r for r in res.rebalances if r.as_of == _as_of(days[5])][0]
+            assert after_sell.holdings == {}, f"{rule}: 청산되지 않았다"

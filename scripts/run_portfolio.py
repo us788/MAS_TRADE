@@ -69,7 +69,8 @@ def show(label, res, bench=None):
 def main() -> int:
     ap = argparse.ArgumentParser(description="가상 포트폴리오")
     ap.add_argument("--market", choices=("KR", "US"), action="append")
-    ap.add_argument("--rule", choices=("exclude_sell", "buy_only"), default=None,
+    ap.add_argument("--rule", choices=("exclude_sell", "buy_only", "sell_to_cash"),
+                    default=None,
                     help="기본은 둘 다 돌려 비교한다")
     ap.add_argument("--strategy", default=None, help="룰 전략 이름 (기본: 전부)")
     ap.add_argument("--signals", action="store_true", help="저장된 LLM 시그널로 돌린다")
@@ -78,7 +79,7 @@ def main() -> int:
     store = PriceStore()
     runner = StrategyRunner(store)
     markets = args.market or ["KR", "US"]
-    rules = [args.rule] if args.rule else ["exclude_sell", "buy_only"]
+    rules = [args.rule] if args.rule else ["exclude_sell", "buy_only", "sell_to_cash"]
 
     for market in markets:
         cov = store.coverage("005930" if market == "KR" else "AAPL")

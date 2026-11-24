@@ -38,9 +38,23 @@ from src.eval.scoring import COSTS, CostModel
 INITIAL_CAPITAL = {"KR": 10_000_000.0, "US": 10_000.0}
 
 #: 어떤 시그널을 보유로 볼 것인가.
-#:   exclude_sell — 매도만 제외하고 나머지 동일가중 (기획서 9.2절 문구 그대로)
+#:   exclude_sell — 매도만 제외하고 나머지 **동일가중으로 NAV 전액** (기획서 9.2절 문구 그대로)
 #:   buy_only     — 매수만 편입. 더 집중적이라 시그널의 방향성이 선명하게 드러난다
-Rule = Literal["exclude_sell", "buy_only"]
+#:   sell_to_cash — 매도분이 **현금으로 남는다**. 아래.
+Rule = Literal["exclude_sell", "buy_only", "sell_to_cash"]
+
+#: **`sell_to_cash`를 왜 두는가** (2026-11-24).
+#:
+#: 앞의 두 규칙은 편입 종목이 몇 개든 **NAV를 전액 쓴다**. 15종목 중 11종목이
+#: 매도여도 남은 4종목에 100%를 몰아넣는다. 그래서 **모델이 "다 팔아라"라고 말해도
+#: 포트폴리오는 계속 풀 포지션이다** — 10-07 KR 회차가 실제로 11/15 매도였다.
+#:
+#: 층 1은 지수 대비 초과수익이라 시장 전체가 빠지면 상쇄된다. 하지만 층 2는
+#: 롱온리 동일가중이라 그대로 맞는다. 모델이 이미 내린 판단을 **실행할 수단이
+#: 없었던 것**이지 정보가 부족했던 것이 아니다.
+#:
+#: 이 규칙은 각 종목에 **유니버스 1/N**을 주고 매도분을 현금으로 남긴다.
+#: 11/15가 매도면 NAV의 73%가 현금이다.
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,17 @@ def _targets(signals: Sequence, rule: Rule) -> list[str]:
     return sorted({s.symbol for s in signals if s.direction != "sell"})
 
 
+def _slice_count(signals: Sequence, rule: Rule, n_priced: int) -> int:
+    """NAV를 몇 조각으로 나눌 것인가.
+
+    `sell_to_cash`만 **유니버스 전체**로 나눈다 — 빠진 종목 몫은 현금으로 남는다.
+    나머지 둘은 편입 종목 수로 나눠 전액을 쓴다(기존 동작).
+    """
+    if rule != "sell_to_cash":
+        return n_priced
+    return max(len({s.symbol for s in signals}), n_priced, 1)
+
+
 class VirtualPortfolio:
     """동일 금액 가중 가상 포트폴리오. 시장 하나를 끝까지 현지통화로 본다."""
 
@@ -159,13 +184,21 @@ class VirtualPortfolio:
                     skipped.append(symbol)
                 else:
                     priced[symbol] = got
+            # **편입 대상이 없으면 전량 현금이다** (2026-11-24 정정).
+            # 전에는 `continue`로 리밸런싱을 통째로 건너뛰어 **직전 보유를 그대로
+            # 들고 갔다.** 전원 매도가 "현금화"가 아니라 "유지"로 번역된 것이다 —
+            # 어느 규칙의 정의로도 그건 아니다.
             if not priced:
-                continue
-            executed_on = max(d for d, _ in priced.values())
+                if not holdings:
+                    continue
+                executed_on = exec_day
+            else:
+                executed_on = max(d for d, _ in priced.values())
 
             nav_before = cash + self._value(holdings, exec_day)
             # 동일 금액 가중. 소수점 주식을 허용해 반올림이 비중을 흔들지 않게 한다.
-            target_value = nav_before / len(priced)
+            slices = _slice_count(signals, self.rule, len(priced))
+            target_value = nav_before / slices if slices else 0.0
 
             trades, total_cost, traded = [], 0.0, 0.0
             new_holdings: dict[str, float] = {}
