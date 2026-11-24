@@ -182,3 +182,86 @@ def test_세_축을_합치면_베이스라인_재료를_덮는다():
             seen.add("returns")
     assert {"news", "returns", "relative_strength", "ma_gap", "beta_120d",
             "volume_ratio_20d"} <= seen
+
+
+# ---- 펀더멘털: KR만, 그리고 가격을 보지 않는다 ----
+
+_FUND = {
+    "unit": "억원",
+    "statement": "연결",
+    "period": {"label": "3분기보고서", "fiscal_year": 2026, "months": 3,
+               "filed_on": "2026-11-16", "days_since_filing": 9},
+    "latest": {"revenue": 1952532.1, "operating_income": 1074404.8,
+               "net_income": 751361.4, "assets": 7918418.8,
+               "liabilities": 1777303.0, "equity": 6141115.8},
+    "prior_year_same_period": {"revenue": 860617.5},
+    "ratios_pct": {"operating_margin": 55.03, "net_margin": 38.48,
+                   "debt_to_equity": 28.94, "equity_to_assets": 77.55},
+    "yoy_growth_pct": {"revenue": 126.9},
+    "prior_year_margins_pct": {"operating_margin": 14.14},
+    "ttm": {"revenue": 5944634.9, "roe_pct": 34.79},
+}
+
+
+def _fund_analyst():
+    from src.agents.analysts import FundamentalAnalyst
+    return FundamentalAnalyst()
+
+
+def test_펀더멘털은_뉴스도_가격_흐름도_거시도_보지_않는다():
+    sl = _fund_analyst().slice(_ctx(), _MACRO, fundamentals=_FUND)
+    assert set(sl) == {"symbol", "name", "sector", "market", "as_of", "financials"}
+    blob = json.dumps(sl, ensure_ascii=False)
+    assert "VIX" not in blob and "ma_gap" not in blob and "제목" not in blob
+
+
+def test_펀더멘털에_주가를_주지_않는다():
+    """주식 수가 없어 PER·PBR이 안 나온다. 기준가만 주면 LLM이 시가총액을
+    **기억에서** 끌어와 채운다 — 시점 정합성 위반이고 검증도 불가능하다.
+    """
+    sl = _fund_analyst().slice(_ctx(), _MACRO, fundamentals=_FUND)
+    assert "reference" not in sl and "base_price" not in sl
+    assert "1100000" not in json.dumps(sl)
+
+
+def test_재무가_없으면_빈_채로_간다():
+    """US처럼 어댑터가 없는 경우. 없는 값을 지어내지 않는다."""
+    assert _fund_analyst().slice(_ctx(), _MACRO)["financials"] == {}
+
+
+def test_펀더멘털은_KR에서만_돈다():
+    """EDGAR가 IP 차단으로 막혀 US 재무를 못 받는다."""
+    from src.agents.analysts import analysts_for
+    assert "fundamental" in analysts_for("KR")
+    assert "fundamental" not in analysts_for("US")
+    assert set(analysts_for("US")) == {"technical", "news", "macro"}
+
+
+def test_시장마다_프롬프트_버전_키가_다르다():
+    """**비대칭을 고정한 결정**(2026-11-25). 두 시장 성적은 원래 같은 기준으로
+    비교하지 않으므로(CLAUDE.md 4절) 관점 수가 달라도 실험은 성립한다 —
+    실험은 시장 **안에서** 멀티 에이전트 대 베이스라인이다.
+    """
+    assert "fundamental" in prompt_versions("KR")
+    assert "fundamental" not in prompt_versions("US")
+
+
+def test_펀더멘털_프롬프트는_US를_거부한다():
+    import pytest
+    with pytest.raises(ValueError):
+        analyst_system_prompt("fundamental", "US")
+
+
+def test_펀더멘털_프롬프트가_금융업과_밸류에이션_한계를_말한다():
+    """KB금융은 매출·영업이익이 null이고 부채비율이 1,200%를 넘는다.
+    프롬프트가 이걸 말해주지 않으면 에이전트가 부실로 읽는다.
+    """
+    p = analyst_system_prompt("fundamental", "KR")
+    assert "금융업" in p and "예금이 부채로" in p
+    assert "시가총액을 기억에서 끌어오는 것은 금지" in p
+
+
+def test_베이스라인_프롬프트는_그대로다():
+    """에이전트를 붙여도 이미 쌓인 시그널과의 비교가 끊기면 안 된다."""
+    assert prompt_version("KR") == "0e7f98ed40f8"
+    assert prompt_version("US") == "c31d1dcc550a"

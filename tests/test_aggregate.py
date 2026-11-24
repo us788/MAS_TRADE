@@ -163,3 +163,34 @@ def test_지표가_없으면_변동성으로_기각하지_않는다():
     aggs = [aggregate(three("A", "buy", "buy", "buy"))]
     v = RiskEngine().evaluate(aggs, {"A": RiskInput("A", "반도체", None, None)})
     assert v["A"].approved
+
+
+# ---- 짝수 구성: KR은 펀더멘털이 붙어 넷이다 (2026-11-25) ----
+
+def four(symbol, *dirs, conf=0.6):
+    return ops(symbol, *[(a, d, conf) for a, d in
+                         zip(("technical", "news", "macro", "fundamental"), dirs)])
+
+
+def test_넷이_둘씩_갈리면_hold다():
+    """**KR은 에이전트가 넷이라 2-2가 실제로 나온다.** 홀수 전제로 짠 다수결이
+    동수를 임의로 깨면 안 된다 — 못 정한 것은 못 정한 것이다.
+    """
+    assert aggregate(four("A", "buy", "buy", "sell", "sell")).direction is Direction.HOLD
+    assert aggregate(four("A", "buy", "buy", "hold", "hold")).direction is Direction.HOLD
+
+
+def test_넷_중_둘만_같아도_나머지가_갈리면_방향이_선다():
+    """2 매수 / 1 보유 / 1 매도는 최다가 하나뿐이라 동수가 아니다."""
+    a = aggregate(four("A", "buy", "buy", "hold", "sell"))
+    assert a.direction is Direction.BUY
+    assert a.confidence == pytest.approx(0.6 * 0.5, abs=1e-4)   # 동의 2/4
+
+
+def test_펀더멘털은_KR에서만_표를_던진다():
+    """US는 셋이다. 집계 자체는 에이전트 수를 모른다 — 들어온 의견만 센다."""
+    us = three("A", "buy", "buy", "sell")
+    kr = four("A", "buy", "buy", "sell", "sell")
+    assert us.__len__() == 3 and kr.__len__() == 4
+    assert aggregate(us).direction is Direction.BUY     # 2/3
+    assert aggregate(kr).direction is Direction.HOLD    # 2-2

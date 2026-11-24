@@ -19,7 +19,13 @@
 **"에이전트 부분집합 사후 재채점(무료 ablation)"**이 가능하다 — 집계 규칙을 바꾸거나
 "거시만 뺀" 조합을 다시 채점하는 데 LLM 호출이 0회다.
 
-펀더멘털·수급은 어댑터가 없다(`docs/HANDOFF.md` 미결 9번).
+**펀더멘털은 KR만 있다.** EDGAR가 IP 차단으로 막혀 US 재무를 못 받는다.
+그래서 KR은 네 관점, US는 세 관점으로 돈다. **이 비대칭은 고정하기로 했다**
+(2026-11-25) — 두 시장 성적은 원래 같은 기준으로 비교하지 않기 때문이다
+(CLAUDE.md 4절: "US와 KR은 각자 현지통화로 끝까지 따로 본다").
+실험은 시장 **안에서** 멀티 에이전트 대 베이스라인이고 거기엔 영향이 없다.
+
+수급은 아직 어댑터가 없다(`docs/HANDOFF.md` 미결 9번).
 """
 from __future__ import annotations
 
@@ -56,12 +62,16 @@ class Analyst:
     name: str = ""
     market_specific: bool = False
 
+    #: 이 에이전트를 돌릴 시장. None이면 전 시장.
+    markets: tuple[str, ...] | None = None
+
     def __init__(self, client: LLMClient | None = None) -> None:
         self._client = client or LLMClient()
 
     # ---- 하위 클래스가 채운다 ----
 
-    def slice(self, context: SymbolContext, macro: dict | None = None) -> dict:
+    def slice(self, context: SymbolContext, macro: dict | None = None, *,
+              fundamentals: dict | None = None) -> dict:
         raise NotImplementedError
 
     # ---- 공통 ----
@@ -75,11 +85,12 @@ class Analyst:
     def prompt_version(self, market: str) -> str:
         return analyst_prompt_version(self.name, market if self.market_specific else None)
 
-    def analyze(self, context: SymbolContext,
-                macro: dict | None = None) -> AnalystResult:
+    def analyze(self, context: SymbolContext, macro: dict | None = None, *,
+                fundamentals: dict | None = None) -> AnalystResult:
         prefix = analyst_system_prompt(
             self.name, context.market if self.market_specific else None)
-        payload = json.dumps(self.slice(context, macro), ensure_ascii=False,
+        payload = json.dumps(self.slice(context, macro, fundamentals=fundamentals),
+                             ensure_ascii=False,
                              sort_keys=True, default=float)
         messages = build_messages(prefix, payload)
 
@@ -111,7 +122,8 @@ class TechnicalAnalyst(Analyst):
     KEYS = ("bars", "returns", "relative_strength", "ma_gap", "volume_ratio_20d",
             "drawdown_from_1y_peak", "annualized_volatility_60d", "index_returns")
 
-    def slice(self, context: SymbolContext, macro: dict | None = None) -> dict:
+    def slice(self, context: SymbolContext, macro: dict | None = None, *,
+              fundamentals: dict | None = None) -> dict:
         ind = context.indicators or {}
         return {
             **self._head(context),
@@ -134,7 +146,8 @@ class NewsAnalyst(Analyst):
     #: 반영 여부 판단에 필요한 최소 창.
     RETURN_KEYS = ("5d", "20d")
 
-    def slice(self, context: SymbolContext, macro: dict | None = None) -> dict:
+    def slice(self, context: SymbolContext, macro: dict | None = None, *,
+              fundamentals: dict | None = None) -> dict:
         returns = (context.indicators or {}).get("returns") or {}
         return {
             **self._head(context),
@@ -154,7 +167,8 @@ class MacroAnalyst(Analyst):
     KEYS = ("beta_120d", "annualized_volatility_60d",
             "index_annualized_volatility_60d", "relative_strength")
 
-    def slice(self, context: SymbolContext, macro: dict | None = None) -> dict:
+    def slice(self, context: SymbolContext, macro: dict | None = None, *,
+              fundamentals: dict | None = None) -> dict:
         ind = context.indicators or {}
         return {
             **self._head(context),
@@ -163,17 +177,50 @@ class MacroAnalyst(Analyst):
         }
 
 
+class FundamentalAnalyst(Analyst):
+    """재무제표. **뉴스도 가격 흐름도 거시도 보지 않는다.**
+
+    **가격을 주지 않는다.** 밸류에이션을 보려면 주식 수가 있어야 PER·PBR이 나오는데
+    DART 재무 응답에는 없다. 기준가만 주면 LLM이 시가총액을 **기억에서** 끌어와
+    채우고, 그건 시점 정합성 위반이면서 검증도 불가능하다. 그래서 이 에이전트의
+    축은 "싸다/비싸다"가 아니라 **"좋아지는 중인가"**다.
+
+    이 때문에 다른 셋과 달리 **베이스라인이 안 보는 재료**를 본다. 베이스라인은
+    재무를 받지 않는다. 그래서 KR에서 멀티 에이전트가 이기면 "구조가 이긴 것"과
+    "재무라는 정보가 더해진 것"이 섞인다 — **의견을 개별 저장하므로 사후에
+    펀더멘털만 빼고 재채점하면 분리된다**(LLM 호출 0회).
+    """
+
+    name = "fundamental"
+    market_specific = True
+    markets = ("KR",)
+
+    def slice(self, context: SymbolContext, macro: dict | None = None, *,
+              fundamentals: dict | None = None) -> dict:
+        return {**self._head(context), "financials": fundamentals or {}}
+
+
 #: 지금 돌릴 수 있는 에이전트. 어댑터가 생기면 여기에 붙인다.
 ANALYSTS: dict[str, type[Analyst]] = {
     TechnicalAnalyst.name: TechnicalAnalyst,
     NewsAnalyst.name: NewsAnalyst,
     MacroAnalyst.name: MacroAnalyst,
+    FundamentalAnalyst.name: FundamentalAnalyst,
 }
 
 
+def analysts_for(market: str) -> dict[str, type[Analyst]]:
+    """그 시장에서 돌릴 에이전트. 펀더멘털은 KR만이다."""
+    return {name: cls for name, cls in ANALYSTS.items()
+            if cls.markets is None or market in cls.markets}
+
+
 def prompt_versions(market: str) -> dict[str, str]:
-    """에이전트별 프롬프트 해시. 시그널 로그에 남겨 경계를 긋는다."""
+    """에이전트별 프롬프트 해시. 시그널 로그에 남겨 경계를 긋는다.
+
+    **시장마다 키 집합이 다르다** — US에는 펀더멘털이 없다.
+    """
     return {
         name: analyst_prompt_version(name, market if cls.market_specific else None)
-        for name, cls in ANALYSTS.items()
+        for name, cls in analysts_for(market).items()
     }

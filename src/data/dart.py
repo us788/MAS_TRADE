@@ -314,3 +314,178 @@ class DartStore:
                 "SELECT COUNT(*) AS n FROM (SELECT symbol, bsns_year, reprt_code, fs_div"
                 " FROM financials GROUP BY 1,2,3,4 HAVING COUNT(*) > 1)").fetchone()["n"]
         return {"total": total, "symbols": syms, "amended_periods": amended}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 프롬프트에 넣을 펀더멘털 묶음
+#
+# **계산은 전부 여기서 끝낸다** (CLAUDE.md 3절). LLM에게 매출과 영업이익을 주고
+# 영업이익률을 구하게 하면 그 나눗셈이 틀려도 근거 로그에 사실처럼 남는다.
+#
+# **분기 금액은 누계가 아니라 당분기(3개월)다.** 실측으로 확인했다(2026-11-25) —
+# `thstrm_amount`를 읽고 있고, 2025년 네 종목 모두 Q1+Q2+Q3에 함축 Q4를 더하면
+# 사업보고서 연간치와 맞아떨어진다. 누계였다면 삼성전자 2026이
+# 133.9 → 37.6 → 23.8조로 붕괴하는 모양이 된다. 그래서 **전년 동기 비교는
+# 같은 `reprt_code`끼리만** 한다. 사업보고서(11011)만 12개월치라 분기와 섞지 않는다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: 분기보고서의 회계기간 종료 월. 사업보고서(11011)는 여기 넣지 않는다 —
+#: 12개월치라 분기 합산에 끼면 이중계상이 된다.
+_QUARTER_MONTH = {"11013": 3, "11012": 6, "11014": 9}
+
+ANNUAL_CODE = "11011"
+
+#: 프롬프트 표시 단위. 원 단위 그대로면 15자리라 LLM이 읽다 자릿수를 틀린다.
+UNIT = 1e8
+UNIT_LABEL = "억원"
+
+
+def _scaled(value: float | None) -> float | None:
+    """억원으로 환산. **결측은 0이 아니라 None으로 남긴다.**"""
+    return None if value is None else round(value / UNIT, 1)
+
+
+def _ratio_pct(num: float | None, den: float | None) -> float | None:
+    """비율(%). 분모가 없거나 0이면 None — 0으로 나누지 않는다."""
+    if num is None or den is None or den == 0:
+        return None
+    return round(num / den * 100, 2)
+
+
+def _growth_pct(now: float | None, before: float | None) -> float | None:
+    """증감률(%). **기준이 적자면 None이다.**
+
+    -1,000억에서 +500억이 되면 산술적으로는 -150%지만 그건 악화로 읽힌다.
+    흑자 전환은 증감률로 표현할 수 없으므로 수치를 주지 않고, 대신 두 기간의
+    금액을 모두 넘겨 LLM이 직접 보게 한다.
+    """
+    if now is None or before is None or before <= 0:
+        return None
+    return round((now - before) / before * 100, 1)
+
+
+def _pick_periods(rows: list[dict]) -> dict[tuple[int, str], dict]:
+    """(연도, 보고서)별 한 건만 남긴다.
+
+    **연결(CFS)을 별도(OFS)보다 우선**하고, 같은 구분이면 **늦게 접수된 것**을 쓴다.
+    정정공시가 올라오면 원공시를 덮어야 한다.
+    """
+    best: dict[tuple[int, str], dict] = {}
+    for r in rows:
+        key = (r["bsns_year"], r["reprt_code"])
+        prev = best.get(key)
+        if prev is None or (
+            (r["fs_div"] == "CFS", r["filed_on"])
+            > (prev["fs_div"] == "CFS", prev["filed_on"])
+        ):
+            best[key] = r
+    return best
+
+
+def _sum_quarters(periods: dict, year: int, codes: Iterable[str],
+                  field: str) -> float | None:
+    """해당 연도 분기들의 합. **하나라도 빠지면 None이다** — 부분합은 거짓말이다."""
+    total = 0.0
+    for c in codes:
+        row = periods.get((year, c))
+        if row is None or row.get(field) is None:
+            return None
+        total += row[field]
+    return total
+
+
+def _ttm(periods: dict, year: int, reprt_code: str, field: str) -> float | None:
+    """최근 12개월 합계.
+
+    분기 금액이 3개월치이므로 **직전 사업보고서에서 지나간 분기를 빼고
+    올해 분기를 더하면** 12개월이 된다::
+
+        TTM = Σ올해분기(R까지) + 작년연간 − Σ작년분기(R까지)
+
+    분기 하나만 보면 계절성과 일회성 비용에 휘둘린다. 조각이 하나라도 없으면
+    None을 돌려주고 추정하지 않는다.
+    """
+    if reprt_code == ANNUAL_CODE:
+        row = periods.get((year, ANNUAL_CODE))
+        return row.get(field) if row else None
+
+    month = _QUARTER_MONTH.get(reprt_code)
+    if month is None:
+        return None
+    codes = [c for c, m in _QUARTER_MONTH.items() if m <= month]
+
+    current = _sum_quarters(periods, year, codes, field)
+    prior = _sum_quarters(periods, year - 1, codes, field)
+    annual = periods.get((year - 1, ANNUAL_CODE))
+    if current is None or prior is None or annual is None:
+        return None
+    if annual.get(field) is None:
+        return None
+    return current + annual[field] - prior
+
+
+def fundamentals_as_of(store: "DartStore", symbol: str, as_of: datetime) -> dict | None:
+    """`as_of` 시점에 공시돼 있던 재무와 **코드가 계산한 비율**.
+
+    접수일자로 먼저 거르므로 미래 공시가 새어 들어오지 않는다. 돌려주는 값은
+    전부 억원 단위이고, 비율은 %다. 공시가 하나도 없으면 None.
+    """
+    cutoff = as_of.astimezone(KST).date()
+    with store.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM financials WHERE symbol = ? AND filed_on <= ?",
+            (symbol, cutoff.isoformat()))]
+    if not rows:
+        return None
+
+    periods = _pick_periods(rows)
+    year, code = max(periods, key=lambda k: (k[0], _PERIOD_END_MONTH.get(k[1], 0),
+                                             periods[k]["filed_on"]))
+    latest = periods[(year, code)]
+    months = 12 if code == ANNUAL_CODE else 3
+
+    prior = periods.get((year - 1, code))
+    equity = latest.get("equity")
+
+    ttm = {f: _ttm(periods, year, code, f)
+           for f in ("revenue", "operating_income", "net_income")}
+
+    return {
+        "unit": UNIT_LABEL,
+        "statement": "연결" if latest["fs_div"] == "CFS" else "별도",
+        "period": {
+            "label": REPORT_CODES.get(code, code),
+            "fiscal_year": year,
+            "months": months,
+            "filed_on": latest["filed_on"],
+            "days_since_filing": (cutoff - date.fromisoformat(latest["filed_on"])).days,
+        },
+        "latest": {f: _scaled(latest.get(f)) for f in _VALUE_FIELDS},
+        "prior_year_same_period": (
+            None if prior is None
+            else {f: _scaled(prior.get(f)) for f in _VALUE_FIELDS}),
+        "ratios_pct": {
+            "operating_margin": _ratio_pct(latest.get("operating_income"),
+                                           latest.get("revenue")),
+            "net_margin": _ratio_pct(latest.get("net_income"), latest.get("revenue")),
+            "debt_to_equity": _ratio_pct(latest.get("liabilities"), equity),
+            "equity_to_assets": _ratio_pct(equity, latest.get("assets")),
+        },
+        "yoy_growth_pct": (
+            {f: None for f in ("revenue", "operating_income", "net_income")}
+            if prior is None else
+            {f: _growth_pct(latest.get(f), prior.get(f))
+             for f in ("revenue", "operating_income", "net_income")}),
+        "prior_year_margins_pct": (
+            None if prior is None else {
+                "operating_margin": _ratio_pct(prior.get("operating_income"),
+                                               prior.get("revenue")),
+                "net_margin": _ratio_pct(prior.get("net_income"), prior.get("revenue")),
+            }),
+        "ttm": {
+            **{f: _scaled(v) for f, v in ttm.items()},
+            "operating_margin_pct": _ratio_pct(ttm["operating_income"], ttm["revenue"]),
+            "net_margin_pct": _ratio_pct(ttm["net_income"], ttm["revenue"]),
+            "roe_pct": _ratio_pct(ttm["net_income"], equity),
+        },
+    }
