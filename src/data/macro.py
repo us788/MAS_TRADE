@@ -237,3 +237,51 @@ class MacroStore:
             vints = conn.execute(
                 "SELECT COUNT(DISTINCT vintage) AS n FROM macro").fetchone()["n"]
         return {"total": total, "by_series": by, "vintages": vints}
+
+
+# ---------------------------------------------------------------- 피처
+
+#: 변화량을 재는 창(일). 매크로 에이전트는 **수준보다 방향**을 본다 —
+#: 금리가 5%인 것과 5%로 오르는 중인 것은 다른 환경이다.
+CHANGE_WINDOWS = (20, 60)
+
+
+def features_as_of(store: "MacroStore", as_of: datetime,
+                   series: Iterable[str] | None = None) -> dict:
+    """프롬프트에 넣을 매크로 묶음. **계산은 여기서 끝낸다** (CLAUDE.md 3절).
+
+    LLM에게 수준만 주면 "5.12가 높은가"를 스스로 판단해야 하는데 그건 기억에서
+    끌어오는 일이다. **변화량을 코드가 계산해 같이 준다.**
+
+    값이 없으면 `None`으로 남긴다 — 0으로 채우면 LLM이 그걸 사실로 읽는다.
+    """
+    vint = vintage_date(as_of)
+    out: dict[str, dict] = {}
+    with store.connect() as conn:
+        for s in (series or SERIES):
+            rows = [dict(r) for r in conn.execute(
+                "SELECT date, value FROM macro WHERE series_id = ? AND vintage <= ? "
+                "AND value IS NOT NULL ORDER BY date", (s, vint.isoformat()))]
+            if not rows:
+                out[s] = {"label": SERIES.get(s, s), "level": None,
+                          "as_of_date": None,
+                          **{f"change_{d}d": None for d in CHANGE_WINDOWS}}
+                continue
+            latest = rows[-1]
+            entry = {"label": SERIES.get(s, s), "level": latest["value"],
+                     "as_of_date": latest["date"]}
+            for d in CHANGE_WINDOWS:
+                prior = _value_days_before(rows, d)
+                entry[f"change_{d}d"] = (None if prior is None
+                                         else round(latest["value"] - prior, 4))
+            out[s] = entry
+    return {"vintage": vint.isoformat(), "series": out}
+
+
+def _value_days_before(rows: list[dict], days: int) -> float | None:
+    """가장 최근 관측에서 `days` 달력일 이전의 값. 그보다 과거가 없으면 None."""
+    if not rows:
+        return None
+    target = date.fromisoformat(rows[-1]["date"]) - timedelta(days=days)
+    before = [r for r in rows if date.fromisoformat(r["date"]) <= target]
+    return before[-1]["value"] if before else None
