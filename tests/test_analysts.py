@@ -11,7 +11,8 @@ import json
 from datetime import datetime, timezone
 
 from src.agents.analyst_prompts import analyst_prompt_version, analyst_system_prompt
-from src.agents.analysts import ANALYSTS, MacroAnalyst, prompt_versions
+from src.agents.analysts import (ANALYSTS, MacroAnalyst, NewsAnalyst,
+                                 TechnicalAnalyst, prompt_versions)
 from src.agents.context import SymbolContext
 from src.agents.prompts import prompt_version
 
@@ -21,11 +22,13 @@ _IND = {
     "beta_120d": 1.4,
     "annualized_volatility_60d": 0.83,
     "index_annualized_volatility_60d": 0.49,
-    "relative_strength": {"20d": 0.01},
-    "ma_gap": {"20d": -0.1},
+    "relative_strength": {"5d": -0.03, "20d": 0.01, "60d": 0.00, "120d": 0.00},
+    "ma_gap": {"20d": -0.1, "60d": -0.2, "120d": -0.29},
     "volume_ratio_20d": 1.2,
-    "returns": {"20d": -0.09},
+    "returns": {"5d": -0.08, "20d": -0.09, "60d": -0.23, "120d": -0.37},
+    "index_returns": {"5d": -0.05, "20d": -0.10},
     "drawdown_from_1y_peak": -0.2,
+    "bars": 270,
 }
 
 _MACRO = {"vintage": "2026-11-17",
@@ -109,7 +112,73 @@ def test_모르는_에이전트는_거부한다():
 
 
 def test_프롬프트_버전이_기록된다():
-    v = prompt_versions()
+    v = prompt_versions("KR")
     assert set(v) == set(ANALYSTS)
     assert v["macro"] == analyst_prompt_version("macro")
-    assert len(v["macro"]) == 12
+    assert all(len(x) == 12 for x in v.values())
+
+
+def test_뉴스만_시장별로_갈린다():
+    """공시 형식·기사 톤·벤더 태깅 관행이 전부 다르다 (CLAUDE.md 3절).
+    가격 흐름 지표와 매크로 레짐은 시장과 무관하게 같은 뜻이다.
+    """
+    assert prompt_versions("KR")["news"] != prompt_versions("US")["news"]
+    for agent in ("technical", "macro"):
+        assert prompt_versions("KR")[agent] == prompt_versions("US")[agent]
+
+
+def test_시장별_프롬프트는_market을_요구한다():
+    import pytest
+    with pytest.raises(ValueError):
+        analyst_system_prompt("news")
+
+
+# ---- 세 에이전트가 축을 나눠 갖는다 ----
+
+def test_기술적은_뉴스도_거시도_보지_않는다():
+    sl = TechnicalAnalyst().slice(_ctx(), _MACRO)
+    assert "news" not in sl and "macro" not in sl
+    assert "VIX" not in json.dumps(sl, ensure_ascii=False)
+
+
+def test_기술적은_베타를_보지_않는다():
+    """`beta_120d`와 지수 변동성은 **거시의 민감도 축**이다."""
+    ind = TechnicalAnalyst().slice(_ctx(), _MACRO)["indicators"]
+    assert "beta_120d" not in ind
+    assert "index_annualized_volatility_60d" not in ind
+    assert "relative_strength" in ind          # 이건 기술적의 중심 지표다
+
+
+def test_뉴스는_흐름_지표를_보지_않는다():
+    """이동평균·거래량·낙폭은 기술적의 축이다."""
+    sl = NewsAnalyst().slice(_ctx(), _MACRO)
+    assert "indicators" not in sl
+    assert set(sl["returns"]) == {"5d", "20d"}    # 반영 여부 판단용 최소 창
+    assert len(sl["news"]) == 1
+
+
+def test_겹침은_최소한이고_의도된_것이다():
+    """뉴스가 `returns`를 받는 것은 **이미 반영됐는지** 보라는 것이고,
+    거시가 `relative_strength`를 받는 것은 레짐 전달 여부를 보라는 것이다.
+    """
+    news = NewsAnalyst().slice(_ctx(), _MACRO)
+    tech = TechnicalAnalyst().slice(_ctx(), _MACRO)["indicators"]
+    macro = MacroAnalyst().slice(_ctx(), _MACRO)["sensitivity"]
+    assert set(news["returns"]) < set(tech["returns"])        # 진부분집합
+    assert "ma_gap" in tech and "ma_gap" not in macro
+
+
+def test_세_축을_합치면_베이스라인_재료를_덮는다():
+    """**같은 정보, 다른 구조**여야 기획서 12절의 비교가 성립한다."""
+    ctx = _ctx()
+    seen = set()
+    for cls in ANALYSTS.values():
+        sl = cls().slice(ctx, _MACRO)
+        seen |= set(sl.get("indicators", {}))
+        seen |= set(sl.get("sensitivity", {}))
+        if "news" in sl:
+            seen.add("news")
+        if "returns" in sl:
+            seen.add("returns")
+    assert {"news", "returns", "relative_strength", "ma_gap", "beta_120d",
+            "volume_ratio_20d"} <= seen
