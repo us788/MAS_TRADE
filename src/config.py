@@ -44,6 +44,14 @@ SEC_TIMEOUT_SEC = int(os.getenv("SEC_TIMEOUT_SEC", "30"))
 # ---- Finnhub (US 뉴스) ----
 FINNHUB_BASE_URL = os.getenv("FINNHUB_BASE_URL", "https://finnhub.io/api/v1")
 
+# ---- 매크로 (ALFRED) ----
+#
+# **반드시 vintage로 조회한다.** 그냥 받으면 최종 수정치가 오는데 그건 그 시점에
+# 세상에 없던 숫자다 — 실측(2026-11-24): 2026-04-01 실질 GDP가 당시 24,269.6인데
+# 지금 받으면 24,408.0이다. 월별 지표는 아예 미발표인 관측까지 딸려 온다.
+FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred")
+FRED_TIMEOUT_SEC = int(os.getenv("FRED_TIMEOUT_SEC", "30"))
+
 # ---- 네이버 검색 API (KR 뉴스) ----
 # 발급처에 따라 도메인·경로·헤더가 전부 다르다. .env의 NAVER_API_FLAVOR로 고른다.
 NAVER_API_FLAVOR = os.getenv("NAVER_API_FLAVOR", "apihub")
