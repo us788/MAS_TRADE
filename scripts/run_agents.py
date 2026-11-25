@@ -77,6 +77,10 @@ def main() -> int:
     ap.add_argument("--as-of", dest="as_of", default=None,
                     help="ISO8601. 비우면 베이스라인과 같은 수요일 07:00 KST")
     ap.add_argument("--limit", type=int, default=None, help="종목 수 제한 (검증용)")
+    # **빠진 종목 재시도용.** 벤더 오류로 의견이 0건이 된 종목만 다시 집는다 —
+    # 베이스라인의 종목 단위 재시도(11-22)와 같은 뜻이다. 회차를 통째로 다시 돌리면
+    # 멀쩡한 종목까지 두 번 세어지고 돈도 두 번 나간다.
+    ap.add_argument("--symbol", action="append", help="이 종목만 (반복 가능)")
     ap.add_argument("--rule", default="majority",
                     choices=("majority", "confidence_weighted", "unanimous"))
     ap.add_argument("--kind", default=AGENTS_KIND,
@@ -101,6 +105,8 @@ def main() -> int:
 
     for market in markets:
         contexts = builder.build_market(market, as_of)
+        if args.symbol:
+            contexts = [c for c in contexts if c.symbol in set(args.symbol)]
         if args.limit:
             contexts = contexts[:args.limit]
         if not contexts:
